@@ -141,6 +141,7 @@ class CircuitAnalyzer:
     # ------------------------------
 
     # 定义默认集合常量,集中维护,便于修改
+    # 这里需要提取成函数
     _DEFAULT_POWER_POSITIVE = {"VDD", "AVDD", "VDDA", "VDD_CORE", "VCC"}
     _DEFAULT_POWER_NEGATIVE = {"VSS", "AVSS", "VSSA", "GND", "VEE", "GNDA", "gnd!"}
     _DEFAULT_INPUT_NEGATIVE = {"VINN", "VIN1", "VIN_NEG", "INN", "VIN-"}
