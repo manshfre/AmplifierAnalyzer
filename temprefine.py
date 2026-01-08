@@ -30,6 +30,7 @@ class CircuitAnalyzer:
     """
     # ------------------------------
     # 1. 内部类定义
+    # 这里需要设置为函数
     # ------------------------------
     class DeviceTags:       #器件标签类，用于给器件打标签，使用方法为Device.tags.add(DeviceTags.DIODE_MOS)
         DIODE_MOS = "二极管连接MOS管"
