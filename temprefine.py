@@ -5,7 +5,7 @@ import pyAether as ae
 import itertools
 import re
 import math
-from typing import Dict, List, Callable, Set, Optional, DefaultDict, Tuple
+from typing import Dict, List, Callable, Set, Optional, DefaultDict, Tuple, Any
 from collections import defaultdict
 from parameter_manager import ParameterManager
 
@@ -37,46 +37,332 @@ class CircuitAnalyzer:
         # ---------------------级联----------------------
         CASCODE_MAIN = "主级联"
         CASCODE_SLAVE = "从级联"
-        # -------------------对称对----------------------
+        # -------------------器件对----------------------
         DIFF_POSITIVE = "正端输入管"
         DIFF_NEGATIVE = "负端输入管"
 
-        SYM_PAIR = "栅极对称管"  # 栅极接到对称电流支路的管子（输出对符合定义，但被优先识别，所以不会被识别成这个）
-
-        OUTPUT_POSITIVE = "正端输出管"
-        OUTPUT_NEGATIVE = "负端输出管"
+        OUTPORT_POSITIVE = "正输出端管" # 正输出端附近的管子
+        OUTPORT_NEGATIVE = "负输出端管" # 负输出端附近的管子
+        
+        OUTPUT_POSITIVE = "正输出管"  # 逻辑正输出管
+        OUTPUT_NEGATIVE = "负输出管"  # 逻辑负输出管
         # --------------------电流镜----------------------
         LV_MIRROR_UPPER_REF = "上层参考管"
         LV_MIRROR_UPPER_BIAS = "上层偏置管"  # 上层参考管的偏置二极管，低压电流镜不一定有这个管子
         LV_MIRROR_LOWER_REF = "下层参考管"
         LV_MIRROR_UPPER_MIRROR = "上层镜像管"
         LV_MIRROR_LOWER_MIRROR = "下层镜像管"
-        LV_MIRROR_BIAS_MIRROR = "偏置镜像管"
-        LV_MIRROR_PAIR = "镜像对管"
+        LV_MIRROR_BIAS_MIRROR = "偏置低压镜像管"
+        LV_MIRROR_PAIR = "低压镜像对管"
 
-        CURRENT_MIRROR_REF = "电流镜参考管"
-        CURRENT_MIRROR_MIRROR = "电流镜镜像管"
-        CURRENT_MIRROR_BIAS_MIRROR = "电流镜偏置镜像管"
+        CURRENT_MIRROR_REF = "普通电流镜参考管"
+        CURRENT_MIRROR_MIRROR = "普通电流镜镜像管"
+        CURRENT_MIRROR_BIAS_MIRROR = "普通电流镜偏置镜像管"
+
         ROOT_REF = "根参考管"  # 处在电流源路径中
 
         IN_CURRENT_BEAM = "处在电流束"  # 用来判断是否为偏置管，偏置管即处在偏置电路中的管子
         # ----------------------负载------------------------
-        SPEC_A_LOAD_DIO = "A型二极管负载"
-        SPEC_A_LOAD_TYP = "A型典型负载"  # 有源电流镜负载
+        LOAD_TYP = "典型负载"   # 电流镜镜像管，可以是多管
+        
+        LOAD_A_DIO = "有源电流镜二极管负载"
+        LOAD_A_TYP = "有源电流镜典型负载"  # 有源电流镜负载
 
-        SPEC_B_LOAD = "B型负载"  # 双二极管
+        LOAD_B = "双二极管负载"  # 两个二极连接形式的管子分别位于两条对称支路上
 
-        TYPICAL_LOAD = "典型负载"
+        LOAD_C = "对称负载管"  # 栅极接到除去输出电流支路的对称电流支路的对管（即非输出对、非共模检测对）
         # ----------------共模检测----------------------
-        COMMON_DETECT_A = "RC共模检测"
+        COMMON_OUTER = "外侧共模管" #接外部输入的共模管
+        COMMON_INNER = "内侧共模管" #接内部输出的共模管
 
-        COMMON_GET = "共模输入管"
-        COMMON_OUT = "共模输出管"
-        COMMON_DETECT_B = "4管共模检测"
-        # ----------------------RC频率补偿-----------------------
+        COMMON_2MOS = "2管共模检测"  #A型共模检测
+
+        COMMON_4MOS = "4管共模检测"  #B型共模检测
+        # ----------------------RC-----------------------
         COMPENSATE = "频率补偿"
-        # --------------------------滤波--------------------------
+
+        RC_COMMON_DETECT = "RC共模检测" #构成A型共模检测
+
         SYM_CAPACITOR = "对称电容"      #一般指滤波电容
+
+        # ==================== 查询方法 ====================
+    
+        @classmethod
+        def list_tags(cls) -> Dict[str, str]:
+            """
+            查看所有已定义的器件标签
+            返回: {标签名称: 描述} 的字典
+            示例:
+                >>> tags = DeviceTags.list_tags()
+                >>> print(tags["DIODE_MOS"])  # 输出: '二极管连接MOS管'
+            """
+            return {
+                k: v 
+                for k, v in cls.__dict__.items() 
+                if not k.startswith('_') and isinstance(v, str)
+            }
+
+        @classmethod
+        def get_tag(cls, name: str) -> Optional[str]:
+            """
+            获取指定标签的描述
+            参数:
+                name: 标签名称（如 "DIODE_MOS"）
+            返回:
+                标签描述，若不存在则返回 None
+            示例:
+                >>> desc = DeviceTags.get_tag("DIODE_MOS")
+                >>> print(desc)  # 输出: '二极管连接MOS管'
+            """
+            return getattr(cls, name, None)
+
+        # ==================== 修改方法 ====================
+
+        @classmethod
+        def add_tag(cls, name: str, description: str) -> None:
+            """
+            添加新的器件标签或修改现有标签
+            参数:
+                name: 标签名称（必须全大写，可含下划线）
+                description: 标签描述文本
+            异常:
+                ValueError: 名称格式不规范
+            示例:
+                >>> DeviceTags.add_tag("FEEDBACK_RES", "反馈电阻")
+                >>> DeviceTags.add_tag("CUSTOM_TAG", "我的自定义结构")
+            """
+            # 验证名称格式
+            if not name.isupper() or not name.replace("_", "").isalnum():
+                raise ValueError("标签名称必须为大写字母+下划线格式（如 MY_CUSTOM_TAG）")
+            
+            # 检查是否已存在（打印提示）
+            if hasattr(cls, name):
+                old_desc = getattr(cls, name)
+                print(f"[DeviceTags] 更新标签: {name} = '{old_desc}' -> '{description}'")
+            else:
+                print(f"[DeviceTags] 添加新标签: {name} = '{description}'")
+            
+            setattr(cls, name, description)
+
+        @classmethod
+        def remove_tag(cls, name: str) -> None:
+            """
+            删除指定的器件标签
+            参数:
+                name: 要删除的标签名称
+            异常:
+                AttributeError: 标签不存在
+            示例:
+                >>> DeviceTags.remove_tag("CUSTOM_TAG")
+            """
+            if hasattr(cls, name):
+                delattr(cls, name)
+                print(f"[DeviceTags] 已删除标签: {name}")
+            else:
+                raise AttributeError(f"器件标签 '{name}' 不存在")
+
+        @classmethod
+        def reset_to_defaults(cls) -> None:
+            """
+            重置所有标签为默认定义（删除自定义标签）
+            警告: 此操作会删除所有运行时添加的标签
+            示例:
+                >>> DeviceTags.reset_to_defaults()
+            """
+            # 获取默认标签列表
+            default_tags = {
+                'DIODE_MOS', 'CASCODE_MAIN', 'CASCODE_SLAVE', 
+                'DIFF_POSITIVE', 'DIFF_NEGATIVE', 'OUTPORT_POSITIVE', 'OUTPORT_NEGATIVE', 'OUTPUT_POSITIVE', 'OUTPUT_NEGATIVE',
+                'LV_MIRROR_UPPER_REF', 'LV_MIRROR_UPPER_BIAS', 'LV_MIRROR_LOWER_REF',
+                'LV_MIRROR_UPPER_MIRROR', 'LV_MIRROR_LOWER_MIRROR', 'LV_MIRROR_BIAS_MIRROR','LV_MIRROR_PAIR', 
+                'CURRENT_MIRROR_REF', 'CURRENT_MIRROR_MIRROR','CURRENT_MIRROR_BIAS_MIRROR', 'ROOT_REF', 'IN_CURRENT_BEAM',
+                'LOAD_A_DIO', 'LOAD_A_TYP', 'LOAD_B', 'LOAD_C', 'LOAD_TYP',
+                'COMMON_2MOS', 'COMMON_OUTER', 'COMMON_INNER', 'COMMON_4MOS',
+                'COMPENSATE', 'RC_COMMON_DETECT' , 'SYM_CAPACITOR'
+            }
+            
+            # 删除所有非默认标签
+            current_tags = {k for k in cls.__dict__.keys() 
+                        if not k.startswith('_') and isinstance(cls.__dict__[k], str)}
+            custom_tags = current_tags - default_tags
+            
+            for tag in custom_tags:
+                delattr(cls, tag)
+            
+            print(f"[DeviceTags] 已重置为默认值，删除 {len(custom_tags)} 个自定义标签")
+
+    class CircuitPorts:
+        """
+        电路端口常量管理器
+        提供对电源、输入、输出、共模信号等网络名称集合的查询与动态修改能力
+        """
+        
+        # ==================== 默认端口定义 ====================
+        # 电源正端
+        POWER_POSITIVE = {"VDD", "AVDD", "VDDA", "VDD_CORE", "VCC"}
+        # 电源负端/地
+        POWER_NEGATIVE = {"VSS", "AVSS", "VSSA", "GND", "VEE", "GNDA", "gnd!"}
+        # 差分输入正端
+        INPUT_POSITIVE = {"VINP", "VIN2", "VIN_POS", "INP", "VIN+"}
+        # 差分输入负端
+        INPUT_NEGATIVE = {"VINN", "VIN1", "VIN_NEG", "INN", "VIN-"}
+        # 输出正端
+        OUTPORT_POSITIVE = {"VOUTP", "VOUT2", "VOUT_POS", "OUTP", "VOUT+"}
+        # 输出负端
+        OUTPORT_NEGATIVE = {"VOUTN", "VOUT1", "VOUT_NEG", "OUTN", "VOUT-"}
+        # 共模信号
+        COMMON_SIGN = {"VCM", "VCOM"}
+        # 电流源参考
+        CURRENT_SOURCE = {"IREF", "IIN"}
+
+        # ==================== 查询方法 ====================
+        
+        @classmethod
+        def list_ports(cls) -> Dict[str, Set[str]]:
+            """
+            查看所有已定义的端口常量
+            返回: {端口名称: 名称集合} 的字典
+            示例:
+                >>> ports = CircuitPort.list_ports()
+                >>> print(ports["POWER_POSITIVE"])  # 输出: {'VDD', 'AVDD', ...}
+            """
+            return {
+                k: v.copy() 
+                for k, v in cls.__dict__.items() 
+                if not k.startswith('_') and isinstance(v, set)
+            }
+
+        @classmethod
+        def get_port(cls, name: str) -> Optional[Set[str]]:
+            """
+            获取指定端口名称对应的集合
+            参数:
+                name: 端口常量名称（如 "POWER_POSITIVE"）
+            返回:
+                该端口的名称集合，若不存在则返回 None
+            示例:
+                >>> pos = CircuitPort.get_port("POWER_POSITIVE")
+                >>> print(pos)  # 输出: {'VDD', 'AVDD', ...}
+            """
+            return getattr(cls, name, None)
+
+        # ==================== 修改方法 ====================
+
+        @classmethod
+        def add_port(cls, name: str, value_set: Set[str]) -> None:
+            """
+            添加新的端口常量
+            参数:
+                name: 新端口名称（必须全大写，可含下划线）
+                value_set: 名称字符串集合
+            异常:
+                ValueError: 名称格式不规范
+                TypeError: value_set 不是集合类型
+            示例:
+                >>> CircuitPort.add_port("POWER_PLL", {"VDD_PLL", "AVDD_PLL"})
+            """
+            # 验证名称格式
+            if not name.isupper() or not name.replace("_", "").isalnum():
+                raise ValueError("端口名称必须为大写字母+下划线格式（如 POWER_CUSTOM）")
+            
+            # 验证类型
+            if not isinstance(value_set, set):
+                raise TypeError("端口值必须是 set 类型")
+            
+            # 确保集合元素为字符串
+            if not all(isinstance(item, str) for item in value_set):
+                raise TypeError("集合中的所有元素必须是字符串")
+            
+            # 创建副本避免外部修改影响类属性
+            setattr(cls, name, value_set.copy())
+            print(f"[CircuitPort] 已添加端口常量: {name} = {value_set}")
+
+        @classmethod
+        def remove_port(cls, name: str) -> None:
+            """
+            删除指定的端口常量
+            参数:
+                name: 要删除的端口名称
+            异常:
+                AttributeError: 端口不存在
+            示例:
+                >>> CircuitPort.remove_port("POWER_PLL")
+            """
+            if hasattr(cls, name):
+                delattr(cls, name)
+                print(f"[CircuitPort] 已删除端口常量: {name}")
+            else:
+                raise AttributeError(f"端口常量 '{name}' 不存在")
+
+        # ==================== 元素级操作方法 ====================
+
+        @classmethod
+        def add_to_port(cls, name: str, element: str) -> None:
+            """
+            向现有端口集合中添加单个元素
+            参数:
+                name: 端口名称
+                element: 要添加的网络名称
+            异常:
+                AttributeError: 端口不存在
+                TypeError: 端口值不是集合类型
+            示例:
+                >>> CircuitPort.add_to_port("POWER_POSITIVE", "VDD_GPU")
+            """
+            current = getattr(cls, name, None)
+            if current is None:
+                raise AttributeError(f"端口常量 '{name}' 不存在")
+            
+            if not isinstance(current, set):
+                raise TypeError(f"{name} 不是集合类型，无法添加元素")
+            
+            current.add(element)
+            print(f"[CircuitPort] 已添加 '{element}' 到 {name}")
+
+        @classmethod
+        def remove_from_port(cls, name: str, element: str) -> None:
+            """
+            从端口集合中删除指定元素
+            参数:
+                name: 端口名称
+                element: 要删除的网络名称
+            异常:
+                AttributeError: 端口不存在
+                TypeError: 端口值不是集合类型
+            示例:
+                >>> CircuitPort.remove_from_port("POWER_POSITIVE", "VDD_OLD")
+            """
+            current = getattr(cls, name, None)
+            if current is None:
+                raise AttributeError(f"端口常量 '{name}' 不存在")
+            
+            if not isinstance(current, set):
+                raise TypeError(f"{name} 不是集合类型，无法删除元素")
+            
+            if element in current:
+                current.discard(element)
+                print(f"[CircuitPort] 已从 {name} 删除 '{element}'")
+            else:
+                print(f"[CircuitPort] 警告: '{element}' 不存在于 {name} 中")
+
+        @classmethod
+        def reset_to_defaults(cls) -> None:
+            """
+            重置所有端口常量为默认值
+            示例:
+                >>> CircuitPort.reset_to_defaults()
+            """
+            # 仅重置预定义的端口
+            cls.POWER_POSITIVE = {"VDD", "AVDD", "VDDA", "VDD_CORE", "VCC"}
+            cls.POWER_NEGATIVE = {"VSS", "AVSS", "VSSA", "GND", "VEE", "GNDA", "gnd!"}
+            cls.INPUT_POSITIVE = {"VINP", "VIN2", "VIN_POS", "INP", "VIN+"}
+            cls.INPUT_NEGATIVE = {"VINN", "VIN1", "VIN_NEG", "INN", "VIN-"}
+            cls.OUTPORT_POSITIVE = {"VOUTP", "VOUT2", "VOUT_POS", "OUTP", "VOUT+"}
+            cls.OUTPORT_NEGATIVE = {"VOUTN", "VOUT1", "VOUT_NEG", "OUTN", "VOUT-"}
+            cls.COMMON_SIGN = {"VCM", "VCOM"}
+            cls.CURRENT_SOURCE = {"IREF", "IIN"}
+            print("[CircuitPort] 已重置所有端口为默认值")
+
 
     class SubStructureType:
         """代表分析器可以识别的子结构"""
@@ -90,14 +376,14 @@ class CircuitAnalyzer:
             self.aggregation_rule = aggregation_rule    #获取并判断一组器件是否属于该子结构，是则登记
 
     class DeviceSub:
-        """用于设定器件Device所属子结构实例"""
+        """存储每个Device所属子结构实例索引"""
 
         def __init__(self, sub_type: str, sub_id: str):
             self.sub_type = sub_type
             self.sub_id = sub_id
 
     class CircuitSub:
-        """用于设定电路Circuit子结构实例"""
+        """存储整个Circuit所包含子结构实例"""
 
         def __init__(self, sub_id: str, type: str, members: List[str], constraints: List[str]):
             self.sub_id = sub_id
@@ -106,11 +392,12 @@ class CircuitAnalyzer:
             self.constraints = constraints
 
     class Device:
-        """用于存储分析器识别到的器件"""
+        """存储analyzer识别到的元器件"""
 
-        def __init__(self, name: str, type: str, terminals: Dict[str, str], params: Dict[str, str],
-                     tags: Set[str] = None,
-                     substructures: List['CircuitAnalyzer.DeviceSub'] = None):
+        def __init__(self, name: str, type: str, terminals: Dict[str, str], 
+                     params: Optional[Dict[str, str]] = None,
+                     tags: Optional[Set[str]] = None,
+                     substructures: Optional[List['CircuitAnalyzer.DeviceSub']] = None):
             self.name = name    #器件名称
             self.type = type    #器件类型
             self.terminals = terminals      #器件端口字典
@@ -119,15 +406,15 @@ class CircuitAnalyzer:
             self.substructures = [] if substructures is None else substructures     #器件所有所属子结构
 
     class Circuit:
-        """用于存储分析器识别到的电路"""
+        """存储analyzer识别到的整个电路"""
 
-        def __init__(self, devices_dict: Dict[str, 'CircuitAnalyzer.Device'] = None,
-                     substructure_types: Dict[str, 'CircuitAnalyzer.SubStructureType'] = None,  #这里需要重构到分析器中
-                     substructures: List['CircuitAnalyzer.CircuitSub'] = None,
-                     current_paths: List[List[str]] = None,
-                     current_beams: Dict[str, List[List[str]]] = None,
-                     current_beam_paths: Dict[str, List[Set[str]]] = None,
-                     beam_net_sets: Dict[str, Set[str]] = None
+        def __init__(self, devices_dict: Dict[str, 'CircuitAnalyzer.Device'],
+                     substructure_types: Dict[str, 'CircuitAnalyzer.SubStructureType'],  #这里需要重构到分析器中
+                     substructures: List['CircuitAnalyzer.CircuitSub'],
+                     current_paths: List[List[str]],
+                     current_beams: Dict[str, List[List[str]]],
+                     current_beam_paths: Dict[str, List[Set[str]]],
+                     beam_net_sets: Dict[str, Set[str]]
                      ):
             self.devices_dict = {} if devices_dict is None else devices_dict   #包含电路中所有的器件
             self.substructure_types = {} if substructure_types is None else substructure_types  #注册的子结构（可使用的子结构）
@@ -138,21 +425,6 @@ class CircuitAnalyzer:
             self.beam_net_sets = {} if beam_net_sets is None else beam_net_sets  # 电流束网络
 
     # ------------------------------
-    # 2. CircuitAnalyzer 类属性
-    # ------------------------------
-
-    # 定义默认集合常量,集中维护,便于修改
-    # 这里需要提取成函数
-    _DEFAULT_POWER_POSITIVE = {"VDD", "AVDD", "VDDA", "VDD_CORE", "VCC"}
-    _DEFAULT_POWER_NEGATIVE = {"VSS", "AVSS", "VSSA", "GND", "VEE", "GNDA", "gnd!"}
-    _DEFAULT_INPUT_NEGATIVE = {"VINN", "VIN1", "VIN_NEG", "INN", "VIN-"}
-    _DEFAULT_INPUT_POSITIVE = {"VINP", "VIN2", "VIN_POS", "INP", "VIN+"}
-    _DEFAULT_OUTPUT_NEGATIVE = {"VOUTN", "VOUT1", "VOUT_NEG", "OUTN", "VOUT-"}
-    _DEFAULT_OUTPUT_POSITIVE = {"VOUTP", "VOUT2", "VOUT_POS", "OUTP", "VOUT+"}
-    _DEFAULT_COMMON_SIGN = {"VCM", "VCOM"}
-    _DEFAULT_CURRENT_SOURCE = {"IREF", "IIN"}
-
-    # ------------------------------
     # 3. CircuitAnalyzer 核心方法
     # ------------------------------
 
@@ -161,37 +433,10 @@ class CircuitAnalyzer:
             lib: str,
             cell: str,
             view: str,
-            param_manager: ParameterManager,
-            # 保持Optional标注
-            power_positive: Optional[Set[str]] = None,
-            power_negative: Optional[Set[str]] = None,
-            input_positive: Optional[Set[str]] = None,
-            input_negative: Optional[Set[str]] = None,
-            output_positive: Optional[Set[str]] = None,
-            output_negative: Optional[Set[str]] = None,
-            common_sign: Optional[Set[str]] = None,
-            current_source: Optional[Set[str]] = None
+            param_manager: ParameterManager
     ):
-        # ————————————————————————————————— 导线集合支持外部扩展(默认值+用户自定义)————————————————————————————————————————————————
-        self.power_positive = (
-                power_positive | self._DEFAULT_POWER_POSITIVE) if power_positive is not None else self._DEFAULT_POWER_POSITIVE
-        self.power_negative = (
-                power_negative | self._DEFAULT_POWER_NEGATIVE) if power_negative is not None else self._DEFAULT_POWER_NEGATIVE
-        self.input_positive = (
-                input_positive | self._DEFAULT_INPUT_POSITIVE) if input_positive is not None else self._DEFAULT_INPUT_POSITIVE
-        self.input_negative = (
-                input_negative | self._DEFAULT_INPUT_NEGATIVE) if input_negative is not None else self._DEFAULT_INPUT_NEGATIVE
-        self.output_positive = (
-                output_positive | self._DEFAULT_OUTPUT_POSITIVE) if output_positive is not None else self._DEFAULT_OUTPUT_POSITIVE
-        self.output_negative = (
-                output_negative | self._DEFAULT_OUTPUT_NEGATIVE) if output_negative is not None else self._DEFAULT_OUTPUT_NEGATIVE
-        self.common_sign = (
-                common_sign | self._DEFAULT_COMMON_SIGN) if common_sign is not None else self._DEFAULT_COMMON_SIGN
-        self.current_source = (
-                current_source | self._DEFAULT_CURRENT_SOURCE) if current_source is not None else self._DEFAULT_CURRENT_SOURCE
-
         # -----------------------------------BIOS,引入两字典------------------------------------
-        self.circuit = self.Circuit()
+        self.circuit = self.Circuit()   #type:ignore
 
         self.param_manager = param_manager
         self.device_types = copy.deepcopy(param_manager.device_types)
@@ -207,16 +452,17 @@ class CircuitAnalyzer:
         self.diff_pair_positive: List[str] = []
         self.diff_pair: List[str] = []  # 输入对名称
 
-        self.common_get: List[str] = []  # 共模输入对名称
-        self.common_detect_b: List[str] = []  # 4管共模检测名称
+        self.common_outer: List[str] = []  # 外侧共模管名称
+        self.common_detect2: List[str] = []  # 2管共模检测名称
+        self.common_detect4: List[str] = []  # 4管共模检测名称
 
-        self.positive_output: List[str] = []  # 临时存储输出管
-        self.negative_output: List[str] = []
-        self.output_pair: List[List[str]] = []  # 输出对名称
-        self.vip_output_pair: List[str] = []    # 关键输出对名称
+        self.positive_outport: List[str] = []  # 临时存储输出管
+        self.negative_outport: List[str] = []
+        self.outport_pair: List[List[str]] = []  # 输出端对名称
+        self.output_pair: List[str] = []    # 输出对名称
 
         self.compensate: List[str] = []  # 频率补偿器件名称
-        self.common_detect_a: List[str] = []  # RC共模检测器件名称
+        self.rc_common_detect: List[str] = []  # RC共模检测器件名称
         self.capacitor_pair: List[List[str]] = []  # 对称电容名称（滤波电容）
 
         self.cascode_cache: Dict[str, List[str]] = {}  # 级联，键为主级联管子名称，值为从级联管子名称
@@ -226,10 +472,10 @@ class CircuitAnalyzer:
         # 低压电流镜，键为下层管名称，值中第一个str代表偏置电压提供方式，第二个是上层参考管
         self.lv_current: Dict[str, List[str]] = {} #如果MOS偏置，第三个是偏置MOS管名称，如果不是，第三个是镜像管名称
 
-        self.sym_pair: List[List[str]] = []     #对称对，栅极接对称支路的管子（输出对定义上符合，但不在这个缓存中）
         self.typ_load: List[List[str]] = []     #典型负载名称
         self.A_load: List[List[str]] = []       #有源电流镜负载名称
         self.B_load: List[List[str]] = []       #二极管负载名称
+        self.C_load: List[List[str]] = []     #对称负载管，栅极接对称支路的对管（非输出对，非共模检测）
 
         self.top_nodes: List['CircuitAnalyzer.Device'] = []  # 顶层节点器件列表，指电路中连接在电源正端的器件，是电路中电流路径的起点
         self._flat_beam_cache: Optional[List[Set[str]]] = None  # 用于缓存压平的电流束路径，每个元素是一条电流束路径所包含的所有器件
@@ -253,8 +499,8 @@ class CircuitAnalyzer:
 
         # ----------------------------------------特殊器件检测---------------------------------------------
         self._mark_obvious_tags()  # 标记二极管器件、输入器件、顶层节点、共模检测器件
-        self._mark_output_devices()  # 标记输出管与频率补偿和共模检测A
-        self._mark_common_mode_detect_b()  # 标记共模检测B器件
+        self._mark_outport_devices()  # 标记输出端管与频率补偿RC和共模检测RC
+        self._mark_common_mode_detect_b()  # 标记4管共模检测器件
 
         self._analyze_diode_mos_structures()  # 标记级联器件与普通电流镜器件
         self._mark_root_reference_path()  # 标记普通电流镜根参考管
@@ -282,8 +528,8 @@ class CircuitAnalyzer:
 
         # 缓存输入、输出尾电流源
         self._get_tail_current()
-        # 缓存真正输出对
-        self._get_vip_pair()
+        # 缓存输出对
+        self._get_output_pair()
 
         # 4. 登记 RC 子结构
         self._register_rc_structures()
@@ -389,11 +635,11 @@ class CircuitAnalyzer:
     # ------------对称电容识别辅助函数-----------
     def _is_net_power(self, net: str) -> bool:
         """检查网络是否连接到正电源或负电源"""
-        return self._net_matches(net,self.power_positive) or self._net_matches(net,self.power_negative)
+        return self._net_matches(net,self.CircuitPorts.POWER_POSITIVE) or self._net_matches(net,self.CircuitPorts.POWER_NEGATIVE)
 
     # ------------对称电容识别辅助函数-----------
     def _get_mos_on_net(self, net: str, exclude_devices: Set[str]) -> Set[str]:
-        """获取指定网络上连接的所有MOS管 (宽松匹配)"""
+        """获取指定网络上连接的MOS管，排除指定器件"""
         if not net:
             return set()
 
@@ -444,23 +690,26 @@ class CircuitAnalyzer:
 
     # ------------------连接到电源正端检测--------------------
     def _is_top_node(self, device: 'CircuitAnalyzer.Device') -> bool:
-        """判断器件是否为顶层节点(连接电源正端)"""
+        """
+        判断器件是否为顶层节点(连接电源正端，少了这个器件电路无法工作)
+        电容不被视作构成电流路径（少了这个电容电路仍可以工作，只是指标恶化）
+        """
         if device.type == "PMOS":
             s_net = device.terminals.get("S")
-            return s_net is not None and self._net_matches(s_net, self.power_positive)
+            return s_net is not None and self._net_matches(s_net, self.CircuitPorts.POWER_POSITIVE)
         elif device.type == "NMOS":
             d_net = device.terminals.get("D")
-            return d_net is not None and self._net_matches(d_net, self.power_positive)
+            return d_net is not None and self._net_matches(d_net, self.CircuitPorts.POWER_POSITIVE)
         elif device.type == "Resistor":
             nets = list(device.terminals.values())
-            return any(self._net_matches(net, self.power_positive) for net in nets)
+            return any(self._net_matches(net, self.CircuitPorts.POWER_POSITIVE) for net in nets)
         return False
 
     # ---------------------------------------------子结构约束函数与子结构注册------------------------------------------------------
     def _register_substructure_types(self):
         """注册子结构类型及约束规则"""
-        def sym_pair_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """对称对约束：差分输入对、输出对、共模检测对、对称对（栅极接对称电流支路）
+        def pair_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
+            """对约束：差分输入对、输出端对、输出对、共模检测A、各种负载
             fw/l/m需相同
             """
             if len(members) != 2:
@@ -592,8 +841,8 @@ class CircuitAnalyzer:
 
             return constraints
 
-        def common_detect_b_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """共模检测B约束：
+        def common_detect4_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
+            """4管共模检测约束：
             fw/l/m需相同
             """
             base_constraints = [  # 正常约束
@@ -648,8 +897,8 @@ class CircuitAnalyzer:
             """频率补偿约束 (R同, C同)"""
             return _rc_constraint_helper(members)
 
-        def common_detect_a_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """共模检测A约束 (R同, C同)"""
+        def rc_common_detect_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
+            """RC共模检测约束 (R同, C同)"""
             return _rc_constraint_helper(members)
 
         def sym_capacitor_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
@@ -671,24 +920,23 @@ class CircuitAnalyzer:
             "差分输入对": self.SubStructureType(
                 type_name="差分输入对",
                 required_tags={self.DeviceTags.DIFF_POSITIVE, self.DeviceTags.DIFF_NEGATIVE},
-                constraint_rules=sym_pair_constraint,
+                constraint_rules=pair_constraint,
                 aggregation_rule=lambda roles: lambda
                     roles: self.DeviceTags.DIFF_POSITIVE in roles and self.DeviceTags.DIFF_NEGATIVE in roles
             ),
-            "输出对": self.SubStructureType(
-                type_name="输出对",
-                required_tags={self.DeviceTags.OUTPUT_NEGATIVE, self.DeviceTags.OUTPUT_POSITIVE},
-                constraint_rules=sym_pair_constraint,
+            "输出端对": self.SubStructureType(
+                type_name="输出端对",
+                required_tags={self.DeviceTags.OUTPORT_NEGATIVE, self.DeviceTags.OUTPORT_POSITIVE},
+                constraint_rules=pair_constraint,
                 aggregation_rule=lambda roles: lambda
-                    roles: self.DeviceTags.OUTPUT_NEGATIVE and self.DeviceTags.OUTPUT_POSITIVE in roles
+                    roles: self.DeviceTags.OUTPORT_NEGATIVE and self.DeviceTags.OUTPORT_POSITIVE in roles
             ),
-            "对称对": self.SubStructureType(
-                type_name="对称对",
-                required_tags={self.DeviceTags.SYM_PAIR, self.DeviceTags.COMMON_GET, self.DeviceTags.LV_MIRROR_PAIR},
-                constraint_rules=sym_pair_constraint,
-                aggregation_rule=lambda roles: lambda
-                    roles: self.DeviceTags.SYM_PAIR or self.DeviceTags.COMMON_GET
-                           or self.DeviceTags.LV_MIRROR_PAIR in roles
+            "级联": self.SubStructureType(
+                type_name="级联",
+                required_tags={self.DeviceTags.CASCODE_MAIN, self.DeviceTags.CASCODE_SLAVE},
+                constraint_rules=cascode_constraint,
+                aggregation_rule=lambda
+                    roles: self.DeviceTags.CASCODE_MAIN in roles and self.DeviceTags.CASCODE_SLAVE in roles
             ),
             "低压电流镜": self.SubStructureType(
                 type_name="低压电流镜",
@@ -706,12 +954,12 @@ class CircuitAnalyzer:
                     self.DeviceTags.LV_MIRROR_UPPER_REF
                 ])
             ),
-            "级联": self.SubStructureType(
-                type_name="级联",
-                required_tags={self.DeviceTags.CASCODE_MAIN, self.DeviceTags.CASCODE_SLAVE},
-                constraint_rules=cascode_constraint,
-                aggregation_rule=lambda
-                    roles: self.DeviceTags.CASCODE_MAIN in roles and self.DeviceTags.CASCODE_SLAVE in roles
+            "低压镜像对": self.SubStructureType(
+                type_name="低压镜像对",
+                required_tags={self.DeviceTags.LV_MIRROR_PAIR},
+                constraint_rules=pair_constraint,
+                aggregation_rule=lambda roles: lambda
+                    roles: self.DeviceTags.LV_MIRROR_PAIR in roles
             ),
             "普通电流镜": self.SubStructureType(
                 type_name="普通电流镜",
@@ -722,28 +970,42 @@ class CircuitAnalyzer:
             ),
             "A型负载": self.SubStructureType(
                 type_name="A型负载",
-                required_tags={self.DeviceTags.SPEC_A_LOAD_DIO, self.DeviceTags.SPEC_A_LOAD_TYP},
+                required_tags={self.DeviceTags.LOAD_A_DIO, self.DeviceTags.LOAD_A_TYP},
                 constraint_rules=load_constraint,
                 aggregation_rule=lambda
-                    roles: self.DeviceTags.SPEC_A_LOAD_TYP and self.DeviceTags.SPEC_A_LOAD_DIO in roles
+                    roles: self.DeviceTags.LOAD_A_TYP and self.DeviceTags.LOAD_A_DIO in roles
             ),
             "B型负载": self.SubStructureType(
                 type_name="B型负载",
-                required_tags={self.DeviceTags.SPEC_B_LOAD},
+                required_tags={self.DeviceTags.LOAD_B},
                 constraint_rules=load_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.SPEC_B_LOAD in roles
+                aggregation_rule=lambda roles: self.DeviceTags.LOAD_B in roles
+            ),
+            "C型负载": self.SubStructureType(
+                type_name="C型负载",
+                required_tags={self.DeviceTags.LOAD_C},
+                constraint_rules=pair_constraint,
+                aggregation_rule=lambda roles: lambda
+                    roles: self.DeviceTags.LOAD_C in roles
             ),
             "典型负载": self.SubStructureType(
                 type_name="典型负载",
-                required_tags={self.DeviceTags.TYPICAL_LOAD},
+                required_tags={self.DeviceTags.LOAD_TYP},
                 constraint_rules=load_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.TYPICAL_LOAD in roles
+                aggregation_rule=lambda roles: self.DeviceTags.LOAD_TYP in roles
+            ),
+            "共模检测A": self.SubStructureType(
+                type_name="共模检测A",
+                required_tags={self.DeviceTags.COMMON_OUTER, self.DeviceTags.COMMON_INNER, self.DeviceTags.COMMON_2MOS},
+                constraint_rules=pair_constraint,
+                aggregation_rule=lambda roles: lambda
+                    roles: self.DeviceTags.COMMON_OUTER and self.DeviceTags.COMMON_INNER and self.DeviceTags.COMMON_2MOS in roles
             ),
             "共模检测B": self.SubStructureType(
                 type_name="共模检测B",
-                required_tags={self.DeviceTags.COMMON_OUT, self.DeviceTags.COMMON_GET},
-                constraint_rules=common_detect_b_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.COMMON_OUT and self.DeviceTags.COMMON_GET in roles
+                required_tags={self.DeviceTags.COMMON_4MOS},
+                constraint_rules=common_detect4_constraint,
+                aggregation_rule=lambda roles: self.DeviceTags.COMMON_4MOS in roles
             ),
             "频率补偿": self.SubStructureType(
                 type_name="频率补偿",
@@ -751,11 +1013,11 @@ class CircuitAnalyzer:
                 constraint_rules=compensate_constraint,
                 aggregation_rule=lambda roles: self.DeviceTags.COMPENSATE in roles
             ),
-            "共模检测A": self.SubStructureType(
-                type_name="共模检测A",
-                required_tags={self.DeviceTags.COMMON_DETECT_A},
-                constraint_rules=common_detect_a_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.COMMON_DETECT_A in roles
+            "RC共模检测": self.SubStructureType(
+                type_name="RC共模检测",
+                required_tags={self.DeviceTags.RC_COMMON_DETECT},
+                constraint_rules=rc_common_detect_constraint,
+                aggregation_rule=lambda roles: self.DeviceTags.RC_COMMON_DETECT in roles
             ),
             "对称电容": self.SubStructureType(
                 type_name="对称电容",
@@ -783,22 +1045,22 @@ class CircuitAnalyzer:
             if device.type in ["PMOS", "NMOS"]:
                 g_net = device.terminals.get("G")
                 if g_net:
-                    if self._net_matches(g_net, self.input_positive):
+                    if self._net_matches(g_net, self.CircuitPorts.INPUT_POSITIVE):
                         device.tags.add(self.DeviceTags.DIFF_POSITIVE)
                         self.diff_pair_positive.append(device.name)
-                    elif self._net_matches(g_net, self.input_negative):
+                    elif self._net_matches(g_net, self.CircuitPorts.INPUT_NEGATIVE):
                         device.tags.add(self.DeviceTags.DIFF_NEGATIVE)
                         self.diff_pair_negative.append(device.name)
 
             # ---------------------------------标记共模检测管---------------------------------
             if device.type in ["PMOS", "NMOS"]:
                 g_net = device.terminals.get("G")
-                if self._net_matches(g_net, self.common_sign):
-                    device.tags.add(self.DeviceTags.COMMON_GET)
-                    self.common_get.append(device.name)
+                if self._net_matches(g_net, self.CircuitPorts.COMMON_SIGN):
+                    device.tags.add(self.DeviceTags.COMMON_OUTER)
+                    self.common_outer.append(device.name)
 
-    # ------------------------------------------------ 标记输出管/频率补偿/共模检测A --------------------------------------------------------
-    def _mark_output_devices(self):
+    # ------------------------------------------------ 标记输出管/频率补偿/RC共模检测 --------------------------------------------------------
+    def _mark_outport_devices(self):
         """
         使用 net_device_map 快速标记输出管 (MOS)，
         根据预定义逻辑检测连接到输出端的 RC 结构，应用时应检查预定义逻辑是否匹配电路设计。
@@ -880,20 +1142,20 @@ class CircuitAnalyzer:
                 if not device:
                     continue
 
-                # --- 规则 0: 标记 MOS 输出管 ---
+                # --- 规则 0: 标记 MOS 输出端管 ---
                 if device.type in ["PMOS", "NMOS"]:
                     if net_name.lower() in positive_nets_lower:
-                        if self.DeviceTags.OUTPUT_POSITIVE not in device.tags and (
+                        if self.DeviceTags.OUTPORT_POSITIVE not in device.tags and (
                                 self._net_matches(device.terminals.get("S"), {net_name}) or self._net_matches(
                             device.terminals.get("D"), {net_name})):
-                            device.tags.add(self.DeviceTags.OUTPUT_POSITIVE)
-                            self.positive_output.append(dev_name)
+                            device.tags.add(self.DeviceTags.OUTPORT_POSITIVE)
+                            self.positive_outport.append(dev_name)
                     elif net_name.lower() in negative_nets_lower:
-                        if self.DeviceTags.OUTPUT_NEGATIVE not in device.tags and (
+                        if self.DeviceTags.OUTPORT_NEGATIVE not in device.tags and (
                                 self._net_matches(device.terminals.get("S"), {net_name}) or self._net_matches(
                             device.terminals.get("D"), {net_name})):
-                            device.tags.add(self.DeviceTags.OUTPUT_NEGATIVE)
-                            self.negative_output.append(dev_name)
+                            device.tags.add(self.DeviceTags.OUTPORT_NEGATIVE)
+                            self.negative_outport.append(dev_name)
 
                 # --- 规则 1: 器件是电容 ---
                 elif device.type == "Capacitor":
@@ -913,9 +1175,9 @@ class CircuitAnalyzer:
 
                     elif num_mos == 1:
                         if mos_conns[0]['conn_type'] == 'G':
-                            # Case C2.1 (单MOS 栅极): 标记 COMMON_DETECT_A
-                            cap_device.tags.add(self.DeviceTags.COMMON_DETECT_A)
-                            self.common_detect_a.append(cap_device.name)
+                            # Case C2.1 (单MOS 栅极): 标记 RC_COMMON_DETECT
+                            cap_device.tags.add(self.DeviceTags.RC_COMMON_DETECT)
+                            self.rc_common_detect.append(cap_device.name)
                         else:
                             # Case C2.2 (单MOS S/D): 标记 COMPENSATE
                             cap_device.tags.add(self.DeviceTags.COMPENSATE)
@@ -971,9 +1233,9 @@ class CircuitAnalyzer:
 
                     elif num_mos == 1:
                         if mos_conns[0]['conn_type'] == 'G':
-                            # Case R2.1 (单MOS 栅极): 标记 COMMON_DETECT_A
-                            res1_device.tags.add(self.DeviceTags.COMMON_DETECT_A)
-                            self.common_detect_a.append(res1_device.name)
+                            # Case R2.1 (单MOS 栅极): 标记 RC_COMMON_DETECT
+                            res1_device.tags.add(self.DeviceTags.RC_COMMON_DETECT)
+                            self.rc_common_detect.append(res1_device.name)
                         # else:
                         # Case R2.2 (单MOS S/D): 跳过
 
@@ -992,11 +1254,11 @@ class CircuitAnalyzer:
 
                             if num_mos_far == 1:
                                 if mos_conns_far[0]['conn_type'] == 'G':
-                                    # Case R3.2.1 (R1->R2->单MOS 栅极): 标记两者 COMMON_DETECT_A
-                                    res1_device.tags.add(self.DeviceTags.COMMON_DETECT_A)
-                                    serial_res2.tags.add(self.DeviceTags.COMMON_DETECT_A)
-                                    self.common_detect_a.append(res1_device.name)
-                                    self.common_detect_a.append(serial_res2.name)
+                                    # Case R3.2.1 (R1->R2->单MOS 栅极): 标记两者 RC_COMMON_DETECT
+                                    res1_device.tags.add(self.DeviceTags.RC_COMMON_DETECT)
+                                    serial_res2.tags.add(self.DeviceTags.RC_COMMON_DETECT)
+                                    self.rc_common_detect.append(res1_device.name)
+                                    self.rc_common_detect.append(serial_res2.name)
                                 # else:
                                 # Case R3.1 (R1->R2->多MOS): 跳过
                                 # Case R3.2.2 (R1->R2->单MOS S/D): 跳过
@@ -1005,29 +1267,29 @@ class CircuitAnalyzer:
 
         # --- 主函数体 ---
         # 1. 处理正端输出
-        positive_nets_lower = {n.lower() for n in self.output_positive}
+        positive_nets_lower = {n.lower() for n in self.CircuitPorts.OUTPORT_POSITIVE}
         for net_name_lower in positive_nets_lower:
             device_names = self.net_device_map.get(net_name_lower, [])
             _process_output_net_devices(device_names, net_name_lower)
 
         # 2. 处理负端输出
-        negative_nets_lower = {n.lower() for n in self.output_negative}
+        negative_nets_lower = {n.lower() for n in self.CircuitPorts.OUTPORT_NEGATIVE}
         for net_name_lower in negative_nets_lower:
             device_names = self.net_device_map.get(net_name_lower, [])
             _process_output_net_devices(device_names, net_name_lower)
 
-    # ---------------------------------------------标记B型共模检测 ---------------------------------------------------
+    # ---------------------------------------------标记B型（4管）共模检测 ---------------------------------------------------
     ##################################################################################################################
     def _mark_common_mode_detect_b(self):
         """
-        如果识别到2个共模输入管，则查找其共源极连接的另外两个MOS管。
+        如果识别到2个外侧共模管，则查找其共源极连接的另外2个内侧共模管。
         """
-        if len(self.common_get) != 2:
+        if len(self.common_outer) != 2:
             return
 
         try:
-            dev1 = self.circuit.devices_dict[self.common_get[0]]
-            dev2 = self.circuit.devices_dict[self.common_get[1]]
+            dev1 = self.circuit.devices_dict[self.common_outer[0]]
+            dev2 = self.circuit.devices_dict[self.common_outer[1]]
 
             s_net1 = dev1.terminals.get("S")
             s_net2 = dev2.terminals.get("S")
@@ -1040,7 +1302,7 @@ class CircuitAnalyzer:
 
             other_dev_names = [
                 name for name in all_devs_on_net
-                if name not in self.common_get
+                if name not in self.common_outer
             ]
             other_mos_devices = []
             for name in other_dev_names:
@@ -1053,12 +1315,12 @@ class CircuitAnalyzer:
                 all_four_devices = [dev1, dev2] + other_mos_devices
 
                 # 标记输出管
-                other_mos_devices[0].tags.add(self.DeviceTags.COMMON_OUT)
-                other_mos_devices[1].tags.add(self.DeviceTags.COMMON_OUT)
-                self.common_detect_b = [dev1.name, dev2.name, other_mos_devices[0].name, other_mos_devices[1].name]
+                other_mos_devices[0].tags.add(self.DeviceTags.COMMON_INNER)
+                other_mos_devices[1].tags.add(self.DeviceTags.COMMON_INNER)
+                self.common_detect4 = [dev1.name, dev2.name, other_mos_devices[0].name, other_mos_devices[1].name]
                 # 标记整体结构
                 for dev in all_four_devices:
-                    dev.tags.add(self.DeviceTags.COMMON_DETECT_B)
+                    dev.tags.add(self.DeviceTags.COMMON_4MOS)
                 # print(f"信息：识别到B型共模检测结构，成员: {[d.name for d in all_four_devices]}")
 
         except KeyError:
@@ -1158,7 +1420,7 @@ class CircuitAnalyzer:
         start_net_device_names = []
 
         # 使用 .lower() 匹配 net_device_map 的键
-        current_source_lower = {s.lower() for s in self.current_source}
+        current_source_lower = {s.lower() for s in self.CircuitPorts.CURRENT_SOURCE}
 
         for net_key in self.net_device_map.keys():
             if net_key in current_source_lower:
@@ -1207,7 +1469,7 @@ class CircuitAnalyzer:
                 raise ValueError(f"警告：电流源网络 '{start_net}' 只应该包含MOS管。")
 
             # 5. 检查是否到达终止条件 (电源负端)
-            if not next_net or self._net_matches(next_net, self.power_negative):
+            if not next_net or self._net_matches(next_net, self.CircuitPorts.POWER_NEGATIVE):
                 # print(f"信息：电流源路径在 {current_device.name} 处到达负电源。")
                 break  # 路径结束
 
@@ -1444,7 +1706,7 @@ class CircuitAnalyzer:
                     if not other_net:
                         continue
 
-                    valid = (self._net_matches(other_net, self.power_negative)) or any(
+                    valid = (self._net_matches(other_net, self.CircuitPorts.POWER_NEGATIVE)) or any(
                         (d.type == "NMOS" and d.terminals.get("D") == other_net)
                         for d in self.circuit.devices_dict.values() if d.name != res.name
                     )
@@ -1476,7 +1738,7 @@ class CircuitAnalyzer:
                     if not other_net:
                         continue
 
-                    valid = (self._net_matches(other_net, self.power_negative)) or any(
+                    valid = (self._net_matches(other_net, self.CircuitPorts.POWER_NEGATIVE)) or any(
                         (d.type == "NMOS" and d.terminals.get("D") == other_net) or
                         (d.type == "PMOS" and d.terminals.get("S") == other_net)
                         for d in self.circuit.devices_dict.values() if d.name != res.name
@@ -1491,7 +1753,7 @@ class CircuitAnalyzer:
                     base_net = get_other_net(current, parent_net)
                 else:
                     # 顶层电阻
-                    base_net = get_res_other_net(current, self.power_positive)
+                    base_net = get_res_other_net(current, self.CircuitPorts.POWER_POSITIVE)
 
                 if not base_net:  # <--- 健壮性检查
                     return []
@@ -1513,15 +1775,15 @@ class CircuitAnalyzer:
         def _is_path_terminated(device: 'CircuitAnalyzer.Device') -> bool:  #
             """判断路径是否终止"""
             if device.type == "NMOS":
-                return self._net_matches(device.terminals.get("S"), self.power_negative)
+                return self._net_matches(device.terminals.get("S"), self.CircuitPorts.POWER_NEGATIVE)
             elif device.type == "PMOS":
                 # 这里其实存在逻辑冗余
                 s_net = device.terminals.get("S")
                 d_net = device.terminals.get("D")
-                return self._net_matches(s_net, self.power_negative) or self._net_matches(d_net, self.power_negative)
+                return self._net_matches(s_net, self.CircuitPorts.POWER_NEGATIVE) or self._net_matches(d_net, self.CircuitPorts.POWER_NEGATIVE)
             elif device.type == "Resistor":
                 nets = list(device.terminals.values())
-                return any(self._net_matches(net, self.power_negative) for net in nets)
+                return any(self._net_matches(net, self.CircuitPorts.POWER_NEGATIVE) for net in nets)
             return False
 
         # ------------------------------
@@ -1550,7 +1812,7 @@ class CircuitAnalyzer:
                 if parent_net is not None:
                     child_parent_net = get_other_net(current, parent_net)  # 中间电阻的base_net
                 else:
-                    child_parent_net = get_res_other_net(current, self.power_positive)  # 顶层电阻的base_net
+                    child_parent_net = get_res_other_net(current, self.CircuitPorts.POWER_POSITIVE)  # 顶层电阻的base_net
             else:
                 child_parent_net = None
 
@@ -1605,7 +1867,7 @@ class CircuitAnalyzer:
         # 规则 2: （剩余路径中）所有包含输出管的电流路径
         # -----------------------------------------------------
         #
-        beam2_devices = set(self.positive_output) | set(self.negative_output)
+        beam2_devices = set(self.positive_outport) | set(self.negative_outport)
         beam2_paths: Set[tuple] = set()
 
         if beam2_devices:
@@ -1619,10 +1881,10 @@ class CircuitAnalyzer:
             remaining_paths -= beam2_paths
 
         # -----------------------------------------------------
-        # 规则 2.5: 共模检测B
+        # 规则 2.5: 4管共模检测
         # -----------------------------------------------------
         #
-        beamb_devices = self.common_detect_b
+        beamb_devices = self.common_detect4
         beamb_paths: Set[tuple] = set()
 
         if beamb_devices:
@@ -1640,7 +1902,7 @@ class CircuitAnalyzer:
         # -----------------------------------------------------
         # 3a. 找出所有输出管的栅极网络
         out_gate_nets: Set[str] = set()
-        for dev_name in (self.positive_output + self.negative_output):
+        for dev_name in (self.positive_outport + self.negative_outport):
             device = self.circuit.devices_dict.get(dev_name)
             if device:
                 g_net = device.terminals.get("G")
@@ -1846,8 +2108,8 @@ class CircuitAnalyzer:
     def _register_beam_substructures(self):
         """
         按顺序遍历电流束路径中的 *所有器件对*（避免错误），登记：
-        1. 特殊或G-连接的对称对 (Diff, Out, Loads, Common) 并更新类属性
-        2. 非G-连接的跨束对称对 (SYM_PAIR)，基于 *内部网络* 检查
+        1. 特殊或G-连接的器件对 (Diff, Out, Loads, Common) 并更新类属性
+        2. 非G-连接的跨束负载 (LOAD_C)，基于 *内部网络* 检查
         3.优先登记 4-器件 结构 (CMFB, Quad Load)(后续可优化识别顺序)
         """
         def _register_helper(members: List['CircuitAnalyzer.Device'], sub_type: str,
@@ -1924,8 +2186,8 @@ class CircuitAnalyzer:
                     except KeyError:
                         continue  # 器件不存在
 
-                    # 规则 1: 共模检测B
-                    if all(self.DeviceTags.COMMON_DETECT_B in d.tags for d in members):  #
+                    # 规则 1: 4管共模检测
+                    if all(self.DeviceTags.COMMON_4MOS in d.tags for d in members):  #
                         _register_helper(members, "共模检测B", "cmfb")
                         processed_4_devices.union(element_set_names)
                         continue  # 登记成功
@@ -1941,7 +2203,7 @@ class CircuitAnalyzer:
 
                     if unique_g_nets == 1:
                         # 所有 4 个栅极相连
-                        for d in members: d.tags.add(self.DeviceTags.TYPICAL_LOAD)  #
+                        for d in members: d.tags.add(self.DeviceTags.LOAD_TYP)  #
                         self.typ_load.append(list(element_set_names))
                         _register_helper(members, "典型负载", "typ_load_quad")
                         processed_4_devices.union(element_set_names)
@@ -1964,7 +2226,7 @@ class CircuitAnalyzer:
 
                         members = [dev_a, dev_b]
 
-                        # --- 特殊或G连接的对称对 ---
+                        # --- 特殊或G连接的器件对 ---
                         # 规则 1: 差分输入对
                         a_is_pos = dev_a_name in self.diff_pair_positive
                         a_is_neg = dev_a_name in self.diff_pair_negative
@@ -1977,11 +2239,11 @@ class CircuitAnalyzer:
                             processed_devices.add(dev_b_name)
                             continue  # 登记成功
 
-                        # 规则 2: 输出对
-                        if (dev_a_name in self.positive_output and dev_b_name in self.negative_output) or \
-                                (dev_a_name in self.negative_output and dev_b_name in self.positive_output):
-                            self.output_pair.append([dev_a.name, dev_b.name])
-                            _register_helper(members, "输出对", "out_pair")
+                        # 规则 2: 输出端对
+                        if (dev_a_name in self.positive_outport and dev_b_name in self.negative_outport) or \
+                                (dev_a_name in self.negative_outport and dev_b_name in self.positive_outport):
+                            self.outport_pair.append([dev_a.name, dev_b.name])
+                            _register_helper(members, "输出端对", "outport_pair")
                             processed_devices.add(dev_a_name)
                             processed_devices.add(dev_b_name)
                             continue  # 登记成功
@@ -1991,12 +2253,12 @@ class CircuitAnalyzer:
                         b_is_diode = self.DeviceTags.DIODE_MOS in dev_b.tags  #
                         a_load_match = False
                         if a_is_diode and dev_b_name in self.current_cache.get(dev_a_name, []):
-                            dev_a.tags.add(self.DeviceTags.SPEC_A_LOAD_DIO)  #
-                            dev_b.tags.add(self.DeviceTags.SPEC_A_LOAD_TYP)  #
+                            dev_a.tags.add(self.DeviceTags.LOAD_A_DIO)  #
+                            dev_b.tags.add(self.DeviceTags.LOAD_A_TYP)  #
                             a_load_match = True
                         elif b_is_diode and dev_a_name in self.current_cache.get(dev_b_name, []):
-                            dev_b.tags.add(self.DeviceTags.SPEC_A_LOAD_DIO)  #
-                            dev_a.tags.add(self.DeviceTags.SPEC_A_LOAD_TYP)  #
+                            dev_b.tags.add(self.DeviceTags.LOAD_A_DIO)  #
+                            dev_a.tags.add(self.DeviceTags.LOAD_A_TYP)  #
                             a_load_match = True
                         if a_load_match:
                             self.A_load.append([dev_a_name, dev_b_name])
@@ -2007,8 +2269,8 @@ class CircuitAnalyzer:
 
                         # 规则 4: B型负载 (两个二极管)
                         if a_is_diode and b_is_diode:
-                            dev_a.tags.add(self.DeviceTags.SPEC_B_LOAD)  #
-                            dev_b.tags.add(self.DeviceTags.SPEC_B_LOAD)  #
+                            dev_a.tags.add(self.DeviceTags.LOAD_B)  #
+                            dev_b.tags.add(self.DeviceTags.LOAD_B)  #
                             self.B_load.append([dev_a_name, dev_b_name])
                             _register_helper(members, "B型负载", "b_load")
                             processed_devices.add(dev_a_name)
@@ -2019,37 +2281,38 @@ class CircuitAnalyzer:
                         ref_a = mirror_to_ref_map.get(dev_a_name)
                         ref_b = mirror_to_ref_map.get(dev_b_name)
                         if ref_a is not None and ref_a == ref_b:
-                            dev_a.tags.add(self.DeviceTags.TYPICAL_LOAD)  #
-                            dev_b.tags.add(self.DeviceTags.TYPICAL_LOAD)  #
+                            dev_a.tags.add(self.DeviceTags.LOAD_TYP)  #
+                            dev_b.tags.add(self.DeviceTags.LOAD_TYP)  #
                             self.typ_load.append([dev_a_name, dev_b_name])
                             _register_helper(members, "典型负载", "typ_load")
                             processed_devices.add(dev_a_name)
                             processed_devices.add(dev_b_name)
                             continue  # 登记成功
 
-                        # 规则 6: 对称对 (共模)
-                        a_is_common = dev_a_name in self.common_get
-                        b_is_common = dev_b_name in self.common_get
+                        # 规则 6: 共模检测A
+                        a_is_common = dev_a_name in self.common_outer
+                        b_is_common = dev_b_name in self.common_outer
                         if a_is_common != b_is_common:  # XOR (一个是，一个不是)
+                            self.common_detect2.extend([dev_a_name, dev_b_name])
+
                             new_dev_name = dev_b.name if a_is_common else dev_a.name
-                            if new_dev_name not in self.common_get:
-                                self.common_get.append(new_dev_name)
-                            dev_a.tags.add(self.DeviceTags.COMMON_GET)  #
-                            dev_b.tags.add(self.DeviceTags.COMMON_GET)  #
-                            _register_helper(members, "对称对", "sym_pair")
+                            new_dev = self.circuit.devices_dict[new_dev_name]
+                            new_dev.tags.add(self.DeviceTags.COMMON_INNER)  #
+
+                            _register_helper(members, "共模检测A", "common_pair")
                             processed_devices.add(dev_a_name)
                             processed_devices.add(dev_b_name)
                             continue  # 登记成功
 
-                        # --- 非 G-连接的对称对 ---
+                        # --- 非 G-连接的对称负载 ---
                         g_net_a = dev_a.terminals.get("G")
                         g_net_b = dev_b.terminals.get("G")
                         if g_net_a and g_net_b and g_net_a != g_net_b:
                             if _check_cross_beam_symmetry(dev_a, dev_b):
-                                dev_a.tags.add(self.DeviceTags.SYM_PAIR)  #
-                                dev_b.tags.add(self.DeviceTags.SYM_PAIR)  #
-                                self.sym_pair.append([dev_a_name, dev_b_name])
-                                _register_helper(members, "对称对", "sym_pair_cross")
+                                dev_a.tags.add(self.DeviceTags.LOAD_C)  #
+                                dev_b.tags.add(self.DeviceTags.LOAD_C)  #
+                                self.C_load.append([dev_a_name, dev_b_name])
+                                _register_helper(members, "C型负载", "C_load_cross")
                                 processed_devices.add(dev_a_name)
                                 processed_devices.add(dev_b_name)
                                 continue  # 登记成功
@@ -2059,7 +2322,7 @@ class CircuitAnalyzer:
         """
         遍历所有电流束中的 *实际路径*，查找是否存在
         非偏置的上层镜像管和下层镜像管在路径中连续出现的情况。
-        如果存在，则将它们登记为 "对称对"。
+        如果存在，则将它们登记为 "低压镜像对"。
         """
         processed_pairs = set()  # 避免同一对被重复登记
 
@@ -2109,7 +2372,7 @@ class CircuitAnalyzer:
                         dev_b.tags.add(self.DeviceTags.LV_MIRROR_PAIR)
 
                         self.aggregate_substructure(
-                            sub_type="对称对",
+                            sub_type="低压镜像对",
                             members=[dev_a, dev_b],
                             sub_id=f"lv_mirror_pair_{dev_a_name}_{dev_b_name}"
                         )
@@ -2277,7 +2540,7 @@ class CircuitAnalyzer:
                 continue
 
             # 检查标签
-            has_typ_load = self.DeviceTags.TYPICAL_LOAD in dev.tags
+            has_typ_load = self.DeviceTags.LOAD_TYP in dev.tags
             has_lv_mirror_pair = self.DeviceTags.LV_MIRROR_PAIR in dev.tags
 
             # 规则: 若不存在典型负载标签，直接跳过
@@ -2287,12 +2550,12 @@ class CircuitAnalyzer:
 
             # 存在典型负载标签
             if not has_lv_mirror_pair:
-                # 情况 A: 不存在低压电流镜对称对标签
+                # 情况 A: 不存在低压电流镜镜像对标签
                 # 存入当前两个管子 [A, B]
                 self.output_tail.append(current_list)
                 i += 1
             else:
-                # 情况 B: 存在低压电流镜对称对标签
+                # 情况 B: 存在低压电流镜镜像对标签
                 # 存入当前两个 + 下一个元素的两个 [A, B, C, D]
                 # 基于逻辑保证：下一个元素一定存在
                 if i + 1 < n:
@@ -2305,12 +2568,12 @@ class CircuitAnalyzer:
                     # 异常情况防越界（理论不应到达）
                     i += 1
 
-    #--------------------------------------------------真正输出对----------------------------------------------------
-    def _get_vip_pair(self):
+    #--------------------------------------------------输出对----------------------------------------------------
+    def _get_output_pair(self):
         """
-        识别关键输出对 (VIP Output Pair)。
-        定义：对于一个输出对，如果这两个管子的栅极网络在第一个电流束 (beam_1_differential)
-        的电流束网络集合中，则它们构成关键输出对。
+        识别输出对 (Output Pair)。
+        定义：对于一个输出端对，如果这两个管子的栅极网络在第一个电流束 (beam_1_differential)
+        的电流束网络集合中，则它们构成输出对。
         """
         # 1. 获取第一个电流束的网络集合
         # 对应 "beam_net_sets中第一个键的值"
@@ -2322,8 +2585,8 @@ class CircuitAnalyzer:
         # 为了确保匹配的健壮性，使用小写集合进行比较 (与 _net_matches 逻辑保持一致)
         beam1_nets_lower = {n.lower() for n in beam1_nets}
 
-        # 2. 遍历 output_pair 中的元素
-        for pair in self.output_pair:
+        # 2. 遍历 outport_pair 中的元素
+        for pair in self.outport_pair:
             # pair 是 [name_a, name_b]
             if len(pair) < 2:
                 continue
@@ -2345,15 +2608,15 @@ class CircuitAnalyzer:
             # 4. 检测是否是子集
             # 即：两个管子的栅极网络都在 beam1 的网络集合中
             if g_net_a.lower() in beam1_nets_lower and g_net_b.lower() in beam1_nets_lower:
-                # 存入 self.vip_output_pair
-                self.vip_output_pair = pair
-                # 结束循环 (VIP输出对要么没有，要么只有一对)
+                # 存入 self.output_pair
+                self.output_pair = pair
+                # 结束循环 (输出对要么没有，要么只有一对)
                 break
 
-    # ------------------------------------------登记频率补偿和共模检测A ------------------------------------------------
+    # ------------------------------------------登记频率补偿和RC共模检测 ------------------------------------------------
     def _register_rc_structures(self):
         """
-        遍历 RC 缓存，登记 频率补偿 和 共模检测A 子结构。
+        遍历 RC 缓存，登记 频率补偿 和 RC共模检测 子结构。
         """
         # 1. 登记 频率补偿
         if self.compensate:
@@ -2371,20 +2634,20 @@ class CircuitAnalyzer:
                     sub_id="compensate_rc_global"
                 )
 
-        # 2. 登记 共模检测A
-        if self.common_detect_a:
+        # 2. 登记 RC共模检测
+        if self.rc_common_detect:
             members: List['CircuitAnalyzer.Device'] = []  #
             # 使用 set 确保器件唯一
-            for name in set(self.common_detect_a):
+            for name in set(self.rc_common_detect):
                 dev = self.circuit.devices_dict.get(name)
                 if dev:
                     members.append(dev)
 
             if members:
                 self.aggregate_substructure(
-                    sub_type="共模检测A",
+                    sub_type="RC共模检测",
                     members=members,
-                    sub_id="common_detect_a_rc_global"
+                    sub_id="rc_common_detect_rc_global"
                 )
 
     # -------------------------------------------登记对称电容-------------------------------------------
@@ -2393,7 +2656,7 @@ class CircuitAnalyzer:
             遍历所有未被分配的电容, 检查对称性。
         """
         # 1. 收集候选电容
-        excluded_caps = set(self.compensate).union(set(self.common_detect_a))
+        excluded_caps = set(self.compensate).union(set(self.rc_common_detect))
         caps_to_check = [
             d for d in self.circuit.devices_dict.values()
             if d.type == "Capacitor" and d.name not in excluded_caps
@@ -3077,8 +3340,7 @@ if __name__ == "__main__":
             lib=lib_path,
             cell=cell_name,
             view=view_name,
-            param_manager=param_manager,
-            power_positive={"VDD_1P8"}  # 自定义电源集合
+            param_manager=param_manager
         )
     except Exception as e:
         traceback.print_exc()
@@ -3110,10 +3372,10 @@ if __name__ == "__main__":
     print(f"  差分负输入管 (diff_pair_negative): {analyzer.diff_pair_negative}")
     print(f"  差分输入对 (diff_pair): {analyzer.diff_pair}\n")
 
-    print(f"  正端输出管 (output_positive): {analyzer.positive_output}")
-    print(f"  负端输出管 (output_negative): {analyzer.negative_output}")
-    print(f"  输出对 (output_pair): {analyzer.output_pair}")
-    print(f"    真正输出对(vip_output_pair): {analyzer.vip_output_pair}\n")
+    print(f"  正端输出管 (OUTPORT_POSITIVE): {analyzer.positive_outport}")
+    print(f"  负端输出管 (OUTPORT_NEGATIVE): {analyzer.negative_outport}")
+    print(f"  输出端对 (outport_pair): {analyzer.outport_pair}")
+    print(f"    输出对(output_pair): {analyzer.output_pair}\n")
 
     print(f"  级联缓存 (cascode_cache): {analyzer.cascode_cache}")
     print(f"  普通电流镜缓存 (current_cache): {analyzer.current_cache}")
@@ -3121,16 +3383,16 @@ if __name__ == "__main__":
     print(f"  低压电流镜缓存 (lv_current): {analyzer.lv_current}\n")
 
     print(f"  频率补偿缓存 (compensate): {analyzer.compensate}")
-    print(f"  共模检测A缓存 (common_detect_a): {analyzer.common_detect_a}")
+    print(f"  RC共模检测缓存 (rc_common_detect): {analyzer.rc_common_detect}")
     print(f"  对称电容对 (capacitor_pair): {analyzer.capacitor_pair}\n")
 
-    print(f"  共模检测B缓存 (common_detect_b): {analyzer.common_detect_b}")
-    print(f"  共模输入对 (common_get): {analyzer.common_get}\n")
+    print(f"  4管共模检测缓存 (common_detect4): {analyzer.common_detect4}")
+    print(f"  2管共模检测缓存 (common_detect2): {analyzer.common_detect2}\n")
 
     print(f"  A型负载 (A_load): {analyzer.A_load}")
     print(f"  B型负载 (B_load): {analyzer.B_load}")
     print(f"  典型负载 (typ_load): {analyzer.typ_load}")
-    print(f"  对称对 (sym_pair): {analyzer.sym_pair}\n")
+    print(f"  C型负载 (C_load): {analyzer.C_load}\n")
 
     print(f"    输入尾电流源(input_tail): {analyzer.input_tail}")
     print(f"    输出电流源(output_tail): {analyzer.output_tail}")
