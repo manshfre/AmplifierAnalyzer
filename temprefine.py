@@ -1,11 +1,10 @@
-import os
 import copy
 import traceback
-import pyAether as ae
 import itertools
 import re
 import math
-from typing import Dict, List, Callable, Set, Optional, DefaultDict, Tuple, Any
+from dataclasses import dataclass, field
+from typing import Dict, List, Callable, Set, Optional, DefaultDict, Tuple, Any, Union
 from collections import defaultdict
 from parameter_manager import ParameterManager
 
@@ -23,14 +22,13 @@ class CircuitAnalyzer:
     """
     电路分析器 (CircuitAnalyzer)
     调用后可对电路的子结构进行分析、对参数进行精简、对初始解进行修改
-    DeviceTags和SubStructureType是这个分析器的工具，代表这个分析器可以识别的器件标签和子结构类型。
+    DeviceTags、CircuitPorts、SubStructureType、DPPConfig是这个分析器的工具，代表这个分析器可以识别的器件标签、特殊端口名称、子结构类型、分析器数据接口格式。
     Device是该分析器识别到的器件、DeviceSub是器件所属子结构实例的引用
     Circuit是该分析器识别到的电路、CircuitSub是在Circuit中识别出的子结构实例
     子结构要先注册到SubStructureType中，才能被识别并登记到CircuitSub中与DeviceSub中
     """
     # ------------------------------
     # 1. 内部类定义
-    # 这里需要设置为函数
     # ------------------------------
     class DeviceTags:       #器件标签类，用于给器件打标签，使用方法为Device.tags.add(DeviceTags.DIODE_MOS)
         DIODE_MOS = "二极管连接MOS管"
@@ -363,7 +361,6 @@ class CircuitAnalyzer:
             cls.CURRENT_SOURCE = {"IREF", "IIN"}
             print("[CircuitPort] 已重置所有端口为默认值")
 
-
     class SubStructureType:
         """代表分析器可以识别的子结构"""
 
@@ -375,79 +372,348 @@ class CircuitAnalyzer:
             self.constraint_rules = constraint_rules    #子结构中器件间的参数约束，输入为Device类List，输出为约束字符串List
             self.aggregation_rule = aggregation_rule    #获取并判断一组器件是否属于该子结构，是则登记
 
+    @dataclass
     class DeviceSub:
         """存储每个Device所属子结构实例索引"""
-
-        def __init__(self, sub_type: str, sub_id: str):
-            self.sub_type = sub_type
-            self.sub_id = sub_id
-
+        sub_type: str
+        sub_id: str
+        
+    @dataclass
     class CircuitSub:
         """存储整个Circuit所包含子结构实例"""
+        sub_id: str
+        type: str
+        members: List[str]
+        constraints: List[str]
 
-        def __init__(self, sub_id: str, type: str, members: List[str], constraints: List[str]):
-            self.sub_id = sub_id
-            self.type = type
-            self.members = members
-            self.constraints = constraints
-
+    @dataclass
     class Device:
         """存储analyzer识别到的元器件"""
+        name: str   #器件名称
+        type: str   #器件类型引用
+        terminals: Dict[str, str]   #端口字典，键为端口名称，值为连接的网络名称
+        params: Dict[str, str]  #参数字典，键为参数名称，值为参数值字符串
+        tags: Set[str] = field(default_factory=set) #器件标签
+        substructures: List['CircuitAnalyzer.DeviceSub'] = field(default_factory=list)    #器件所属子结构实例引用列表
 
-        def __init__(self, name: str, type: str, terminals: Dict[str, str], 
-                     params: Optional[Dict[str, str]] = None,
-                     tags: Optional[Set[str]] = None,
-                     substructures: Optional[List['CircuitAnalyzer.DeviceSub']] = None):
-            self.name = name    #器件名称
-            self.type = type    #器件类型
-            self.terminals = terminals      #器件端口字典
-            self.params = params    #器件参数字典
-            self.tags = set() if tags is None else tags     #器件标签集合
-            self.substructures = [] if substructures is None else substructures     #器件所有所属子结构
-
+    @dataclass
     class Circuit:
-        """存储analyzer识别到的整个电路"""
+        """
+            存储 Analyzer 识别到的整个电路。
+            初始化时所有容器自动建立为空。
+        """
+        # 识别到的器件字典
+        devices_dict: Dict[str, 'CircuitAnalyzer.Device'] = field(default_factory=dict)
 
-        def __init__(self, devices_dict: Dict[str, 'CircuitAnalyzer.Device'],
-                     substructure_types: Dict[str, 'CircuitAnalyzer.SubStructureType'],  #这里需要重构到分析器中
-                     substructures: List['CircuitAnalyzer.CircuitSub'],
-                     current_paths: List[List[str]],
-                     current_beams: Dict[str, List[List[str]]],
-                     current_beam_paths: Dict[str, List[Set[str]]],
-                     beam_net_sets: Dict[str, Set[str]]
-                     ):
-            self.devices_dict = {} if devices_dict is None else devices_dict   #包含电路中所有的器件
-            self.substructure_types = {} if substructure_types is None else substructure_types  #注册的子结构（可使用的子结构）
-            self.substructures = [] if substructures is None else substructures     #登记的子结构（电路中实际存在的子结构）
-            self.current_paths = [] if current_paths is None else current_paths  # 电流路径
-            self.current_beams = {} if current_beams is None else current_beams  # 电流束
-            self.current_beam_paths = {} if current_beam_paths is None else current_beam_paths  # 电流束路径
-            self.beam_net_sets = {} if beam_net_sets is None else beam_net_sets  # 电流束网络
+        # 登记的子结构（电路中实际存在的子结构）
+        substructures: List['CircuitAnalyzer.CircuitSub'] = field(default_factory=list)
+        # 电流路径
+        current_paths: List[List[str]] = field(default_factory=list)
+        # 电流束
+        current_beams: Dict[str, List[List[str]]] = field(default_factory=dict)
+        # 电流束路径
+        current_beam_paths: Dict[str, List[Set[str]]] = field(default_factory=dict)
+        # 电流束网络
+        beam_net_sets: Dict[str, Set[str]] = field(default_factory=dict)
+
+    class DPPConfig:
+        """
+        器件-端口-参数配置中心（Device-Port-Parameter Configuration）
+        
+        此类定义了从网表解析到分析全过程的数据格式契约，包含三个不可变键的字典：
+        1. DEVICE_CONFIG: 定义分析器对器件类型的引用格式，验证devices_information[1]）
+        2. PORT_CONFIG: 定义分析器对器件端口的引用格式，验证devices_information[2]的键）
+        3. PARAM_CONFIG: 定义分析器对器件参数的引用格式，验证devices_information[3]的键）
+        这里要修改PORT_CONFIG和PARAM_CONFIG的键与值，以后子结构注册与参数约束、参数校验都会用到
+        
+        键的约束：
+        - NMOS与PMOS的PORT_CONFIG必须相等
+        - CAPACITOR与RESISTOR的PORT_CONFIG必须相等
+        - NMOS与PMOS的PARAM_CONFIG必须相等
+        后续可以优化，目前仅支持上述四种器件类型。
+        
+        **键（大写标识符）代表逻辑上的各种器件类型，不可增删改，仅可修改其对应值**
+        """
+        
+        # ==================== 1. 器件类型配置字典 ====================
+        # 键: 大写类型标识符（固定）
+        # 值: 该实际器件类型在分析器中对应的唯一器件类型名字符串（可配置）
+        # 作用: 验证 devices_information[1] 的合法性
+        DEVICE_CONFIG = {
+            "NMOS": "NMOS",           # 本分析器用“NMOS”来指代逻辑上的NMOS管
+            "PMOS": "PMOS",           # 本分析器用“PMOS”来指代逻辑上的PMOS管
+            "CAPACITOR": "Capacitor", # 本分析器用“Capacitor”来指代逻辑上的电容
+            "RESISTOR": "Resistor"    # 本分析器用“Resistor”来指代逻辑上的电阻
+        }
+        
+        # ==================== 2. 器件端口配置字典 ====================
+        # 键: 大写类型标识符（固定）
+        # 值: 合法的端口名称集合（可配置）
+        # 作用: 验证 devices_information[2] 的键的合法性
+        #
+        # 设计约束：
+        # - NMOS与PMOS的端口集合必须相等
+        # - CAPACITOR与RESISTOR的端口集合必须相等
+        PORT_CONFIG = {
+            "NMOS": {"G", "D", "S", "B"},      # MOS管四端口
+            "PMOS": {"G", "D", "S", "B"},      # 必须与NMOS完全相同
+            "CAPACITOR": {"PLUS", "MINUS"},    # 二端器件
+            "RESISTOR": {"PLUS", "MINUS"}      # 必须与CAPACITOR完全相同
+        }
+        
+        # ==================== 3. 器件参数类型配置字典 ====================
+        # 键: 大写类型标识符（固定）
+        # 值: 合法的参数名称集合（可配置）
+        # 作用: 验证 devices_information[3] 的键的合法性
+        #
+        # 设计约束：
+        # - NMOS与PMOS的参数集合必须相等
+        PARAM_CONFIG = {
+            "NMOS": {"m", "fw", "l"},          # 倍数、宽度、长度
+            "PMOS": {"m", "fw", "l"},          # 必须与NMOS完全相同
+            "CAPACITOR": {"l"},                # 长度（或电容值）
+            "RESISTOR": {"segW", "segL"}       # 宽度、长度
+        }
+        
+        # ==================== 查询方法 ====================
+        
+        @classmethod
+        def get_device_alias(cls, key: str) -> str:
+            """
+            获取指定标识符对应的器件类型名字符串
+            
+            参数:
+                key: 大写类型标识符，如 "NMOS", "CAPACITOR"
+            
+            返回:
+                该标识符当前映射的器件类型名
+                
+            示例:
+                >>> DPPConfig.get_device_alias("NMOS")
+                'NMOS'
+            """
+            if key not in cls.DEVICE_CONFIG:
+                raise KeyError(f"未知类型标识符 '{key}'，有效值为: {list(cls.DEVICE_CONFIG.keys())}")
+            return cls.DEVICE_CONFIG[key]
+        
+        @classmethod
+        def get_legal_ports(cls, key: str) -> Set[str]:
+            """
+            获取指定标识符对应的合法端口名称集合
+            
+            参数:
+                key: 大写类型标识符
+            
+            返回:
+                该标识符允许的端口名称集合
+                
+            示例:
+                >>> DPPConfig.get_legal_ports("NMOS")
+                {'G', 'D', 'S', 'B'}
+            """
+            if key not in cls.PORT_CONFIG:
+                raise KeyError(f"未知类型标识符 '{key}'，有效值为: {list(cls.PORT_CONFIG.keys())}")
+            return cls.PORT_CONFIG[key].copy()
+        
+        @classmethod
+        def get_legal_params(cls, key: str) -> Set[str]:
+            """
+            获取指定标识符对应的合法参数名称集合
+            
+            参数:
+                key: 大写类型标识符
+            
+            返回:
+                该标识符允许的参数名称集合
+                
+            示例:
+                >>> DPPConfig.get_legal_params("NMOS")
+                {'m', 'fw', 'l'}
+            """
+            if key not in cls.PARAM_CONFIG:
+                raise KeyError(f"未知类型标识符 '{key}'，有效值为: {list(cls.PARAM_CONFIG.keys())}")
+            return cls.PARAM_CONFIG[key].copy()
+        
+        # ==================== 动态配置方法 ====================
+        
+        @classmethod
+        def set_device_config(cls, key: str, type_name: str) -> None:
+            """
+            设置指定标识符对应的器件类型名字符串
+            
+            参数:
+                key: 大写类型标识符
+                type_name: 新的器件类型名字符串
+                
+            异常:
+                KeyError: 标识符不存在
+                
+            示例:
+                >>> DPPConfig.set_device_config("NMOS", "N")
+                # 现在解析器必须输出 type="N" 而非 type="NMOS"
+            """
+            if key not in cls.DEVICE_CONFIG:
+                raise KeyError(f"未知类型标识符 '{key}'")
+            
+            cls.DEVICE_CONFIG[key] = type_name
+            print(f"[DPPConfig] 已更新 {key} 的引用格式: '{type_name}'")
+        
+        @classmethod
+        def set_port_config(cls, key: str, ports: Set[str]) -> None:
+            """
+            设置指定标识符对应的合法端口名称集合
+            
+            约束说明：
+            - 若修改"NMOS"，则自动同步修改"PMOS"
+            - 若修改"PMOS"，则自动同步修改"NMOS"
+            - 若修改"CAPACITOR"，则自动同步修改"RESISTOR"
+            - 若修改"RESISTOR"，则自动同步修改"CAPACITOR"
+            
+            参数:
+                key: 大写类型标识符
+                ports: 新的端口名称集合
+            """
+            if key not in cls.PORT_CONFIG:
+                raise KeyError(f"未知类型标识符 '{key}'")
+            
+            # 应用更新
+            cls.PORT_CONFIG[key] = ports.copy()
+            
+            # 自动同步关联标识符
+            if key == "NMOS":
+                cls.PORT_CONFIG["PMOS"] = ports.copy()
+                print(f"[DPPconfig] 自动同步: PMOS端口已更新为 {ports}")
+            elif key == "PMOS":
+                cls.PORT_CONFIG["NMOS"] = ports.copy()
+                print(f"[DPPconfig] 自动同步: NMOS端口已更新为 {ports}")
+            elif key == "CAPACITOR":
+                cls.PORT_CONFIG["RESISTOR"] = ports.copy()
+                print(f"[DPPconfig] 自动同步: RESISTOR端口已更新为 {ports}")
+            elif key == "RESISTOR":
+                cls.PORT_CONFIG["CAPACITOR"] = ports.copy()
+                print(f"[DPPconfig] 自动同步: CAPACITOR端口已更新为 {ports}")
+            
+            print(f"[DPPconfig] 已更新 {key} 的合法端口: {ports}")
+        
+        @classmethod
+        def set_param_config(cls, key: str, params: Set[str]) -> None:
+            """
+            设置指定标识符对应的合法参数名称集合
+            
+            约束说明：
+            - 若修改"NMOS"，则自动同步修改"PMOS"
+            - 若修改"PMOS"，则自动同步修改"NMOS"
+            
+            参数:
+                key: 大写类型标识符
+                params: 新的参数名称集合
+            """
+            if key not in cls.PARAM_CONFIG:
+                raise KeyError(f"未知类型标识符 '{key}'")
+            
+            # 应用更新
+            cls.PARAM_CONFIG[key] = params.copy()
+            
+            # 自动同步关联标识符
+            if key == "NMOS":
+                cls.PARAM_CONFIG["PMOS"] = params.copy()
+                print(f"[DPPconfig] 自动同步: PMOS参数已更新为 {params}")
+            elif key == "PMOS":
+                cls.PARAM_CONFIG["NMOS"] = params.copy()
+                print(f"[DPPconfig] 自动同步: NMOS参数已更新为 {params}")
+            
+            print(f"[DPPconfig] 已更新 {key} 的合法参数: {params}")
+        
+        @classmethod
+        def reset_to_defaults(cls) -> None:
+            """
+            重置所有配置为默认值
+            
+            警告: 此操作会丢失所有自定义配置
+            """
+            cls.DEVICE_CONFIG = {
+                "NMOS": "NMOS",
+                "PMOS": "PMOS",
+                "CAPACITOR": "Capacitor",
+                "RESISTOR": "Resistor"
+            }
+            cls.PORT_CONFIG = {
+                "NMOS": {"G", "D", "S", "B"},
+                "PMOS": {"G", "D", "S", "B"},
+                "CAPACITOR": {"PLUS", "MINUS"},
+                "RESISTOR": {"PLUS", "MINUS"}
+            }
+            cls.PARAM_CONFIG = {
+                "NMOS": {"m", "fw", "l"},
+                "PMOS": {"m", "fw", "l"},
+                "CAPACITOR": {"l"},
+                "RESISTOR": {"segW", "segL"}
+            }
+            print("[DPPConfig] 已重置所有配置为默认值")
+        
+        # ==================== 辅助查询方法 ====================
+        
+        @classmethod
+        def get_identifier_by_type(cls, device_type: str) -> str:
+            """
+            反向查询：根据器件类型字符串获取其大写标识符，在校验devices_information[1]时使用
+            
+            参数:
+                device_type: 解析器输出的器件类型字符串（如"NMOS", "N"）
+            
+            返回:
+                对应的大写标识符（如"NMOS"）
+            
+            示例:
+                >>> DPPConfig.set_device_config("NMOS", "N")
+                >>> DPPConfig.get_identifier_by_type("N")
+                'NMOS'
+            """
+            for key, type_name in cls.DEVICE_CONFIG.items():
+                if device_type == type_name:
+                    return key
+            raise ValueError(f"未知器件类型字符串 '{device_type}'，未在任何标识符中注册")
+        
+        @classmethod
+        def list_all_identifiers(cls) -> List[str]:
+            """列出所有大写类型标识符"""
+            return list(cls.DEVICE_CONFIG.keys())
+        
+        @classmethod
+        def get_config_summary(cls) -> Dict[str, Dict]:
+            """
+            获取当前DPP配置
+            
+            返回:
+                {
+                    "NMOS": {
+                        "type": "NMOS",
+                        "ports": {"G", "D", "S", "B"},
+                        "params": {"m", "fw", "l"}
+                    },
+                    ...
+                }
+            """
+            return {
+                key: {
+                    "type": cls.DEVICE_CONFIG[key],
+                    "ports": cls.PORT_CONFIG[key].copy(),
+                    "params": cls.PARAM_CONFIG[key].copy()
+                }
+                for key in cls.DEVICE_CONFIG.keys()
+            }
 
     # ------------------------------
-    # 3. CircuitAnalyzer 核心方法
+    # 2.初始化
     # ------------------------------
-
-    def __init__(
-            self,
-            lib: str,
-            cell: str,
-            view: str,
-            param_manager: ParameterManager
-    ):
-        # -----------------------------------BIOS,引入两字典------------------------------------
-        self.circuit = self.Circuit()   #type:ignore
-
-        self.param_manager = param_manager
-        self.device_types = copy.deepcopy(param_manager.device_types)
-        self.device_params = copy.deepcopy(param_manager.device_params)
-
-        self._cv = None  # Aether电路视图对象
-
+    def __init__(self):
+        self.circuit = self.Circuit()   
         self.net_device_map: DefaultDict[str, List[str]] = defaultdict(list)  # 网络-器件映射,网络名小写
 
+        self.config_complete: bool = False
+
         self.copy_tube_r_raw_map: Dict[str, Tuple[str, float]] = {}  # 存储 (ref_dev_name, r_raw)
-        # -------------------------------------BOOT，缓存初始化---------------------------------------
+        # -------------------------------------缓存初始化---------------------------------------
         self.diff_pair_negative: List[str] = []  # 临时存储差分管
         self.diff_pair_positive: List[str] = []
         self.diff_pair: List[str] = []  # 输入对名称
@@ -477,23 +743,262 @@ class CircuitAnalyzer:
         self.B_load: List[List[str]] = []       #二极管负载名称
         self.C_load: List[List[str]] = []     #对称负载管，栅极接对称支路的对管（非输出对，非共模检测）
 
-        self.top_nodes: List['CircuitAnalyzer.Device'] = []  # 顶层节点器件列表，指电路中连接在电源正端的器件，是电路中电流路径的起点
-        self._flat_beam_cache: Optional[List[Set[str]]] = None  # 用于缓存压平的电流束路径，每个元素是一条电流束路径所包含的所有器件
-        self.circuit.beam_net_sets = defaultdict(set)       #每个元素是一条电流束路径所包含的所有网络
+        # =========================================================
+        # [重构核心 1]：泛型标签索引 (Tag Index)
+        # 替代了原代码中几十个 self.diff_pair_positive 等列表
+        # 结构: { "标签名": {"dev1", "dev2", ...} }
+        # =========================================================
+        self._tag_index: DefaultDict[str, Set[str]] = defaultdict(set)
 
+        # =========================================================
+        # [重构核心 2]：通用关系图谱 (Relation Graph)
+        # 替代了 cascode_cache, current_cache, lv_current 等专用字典
+        # 结构: { "source_dev_name": { "relation_type": ["target_dev_name", ...] } }
+        # 例如: { "M1": { "current_mirror_slave": ["M2", "M3"], "cascode_slave": ["M4"] } }
+        # =========================================================
+        self._relation_graph: DefaultDict[str, DefaultDict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+
+        # 3. [Device Groups] [新增] 用于存储成组的器件列表 (List of Lists)
+        # 替代原有的 self.outport_pair, self.typ_load, self.common_tail 等
+        # 结构: { "group_type": [ ["M1", "M2"], ["M3", "M4"] ] }
+        self._device_groups: DefaultDict[str, List[List[str]]] = defaultdict(list)
+        
+        # 子结构类型注册表
+        self.substructure_types: Dict[str, 'CircuitAnalyzer.SubStructureType'] = {}
+
+        self.top_nodes: List['CircuitAnalyzer.Device'] = []  # 顶层节点器件列表，指电路中连接在电源正端的器件，是电路中电流路径的起点
+        # 这里的一些缓存要考虑是否需要删除，缓存的名称要更规范一些，最好自动生成
+        self._flat_beam_cache: Optional[List[Set[str]]] = None  # 用于缓存压平的电流束路径，每个元素是一条电流束路径所包含的所有器件
         self.constraint_groups: List[List[str]] = []        #电路的参数组合，偏多，因为没考虑主电路电流匹配
         self.calibrate_params: Dict[str,Dict[str,str]] = {}     #更新后的device_params字典（初始解）
+
+        self.device_params: Dict[str, Dict[str, str]] = {} # 原始参数
 
         self.input_tail: List[str] = []     #输入支路尾电流源
         self.output_tail: List[List[str]] = []    #输出支路电流源对
         self.common_tail: List[List[str]] = []    #输入输出公共尾电流源对
 
-        # --------------------------------BIOS,打开对应原理图-------------------------------
-        self._load_aether_circuit(lib, cell, view)
-        # ------------------- BOOT，读取/生成器件连接导线/参数/建立网络-器件映射/创建Device实例--------------
-        self._init_device_terminals()
-        ae.dbCloseCV(self._cv)
+        #-----------------------------------------电路独立参数生成、修改初始解----------------------------------------------
+        # 预保存复制管电流复制比例
+        # self._precompute_r_raw_map()
+        # # 生成全局约束组
+        # self._generate_constraint_groups()
+        # # 修改初始解
+        # self._calibrate_device_params()
 
+    @classmethod
+    def from_parsed_data(cls, devices_information: List[List[Any]], config_complete: bool):
+        """
+        校验网表解析数据，实例化Device，创建分析器
+
+        验证契约（由DPPConfig强制执行）：
+        - devices_information[i][1] 必须等于 DPPConfig.DEVICE_CONFIG[identifier]
+        - devices_information[i][2] 的键必须是 DPPConfig.PORT_CONFIG[identifier] 的子集
+        - devices_information[i][3] 的键必须是 DPPConfig.PARAM_CONFIG[identifier] 的子集
+        """
+        analyzer = cls()
+        analyzer.config_complete = config_complete
+        
+        if not isinstance(devices_information, list):
+            raise TypeError("devices_information必须是列表")
+
+        # DPPConfig验证
+        for idx, dev_info in enumerate(devices_information):
+            if len(dev_info) != 4:
+                raise ValueError(f"器件信息格式错误（索引{idx}）: 期望4元素，实际{len(dev_info)}")
+
+            # 验证器件类型引用格式
+            dev_type_str = dev_info[1]
+            identifier = cls.DPPConfig.get_identifier_by_type(dev_type_str)
+            
+            # 验证端口配置与格式
+            terminals = dev_info[2]
+            legal_ports = cls.DPPConfig.get_legal_ports(identifier)
+            if not set(terminals.keys()).issubset(legal_ports):
+                raise ValueError(f"器件 '{dev_info[0]}' 端口非法")
+            
+            # 验证参数类型与格式
+            params = dev_info[3]
+            legal_params = cls.DPPConfig.get_legal_params(identifier)
+            if not set(params.keys()).issubset(legal_params):
+                raise ValueError(f"器件 '{dev_info[0]}' 参数非法")
+        
+            # 验证通过，Device实例化
+            name = dev_info[0]
+            # 创建Device实例（params保留所有键值）
+            cls.circuit.devices_dict[name] = cls.Device(
+                name=name,
+                type=dev_type_str,
+                terminals=terminals,
+                params=params
+            )
+
+            # 构建网络-器件映射
+            nets = set(net for net in terminals.values())  # 避免重复添加
+            for net in nets:
+                cls.net_device_map[net.lower()].append(name)
+
+        analyzer._run_analysis_pipeline()
+        return analyzer
+    
+    @classmethod
+    def from_spice_netlist(
+        cls,
+        netlist_path: str,
+        parser_class: Optional[type] = None
+    ) -> 'CircuitAnalyzer':
+        """
+        从SPICE网表创建分析器 - 最常用入口
+        
+        Args:
+            netlist_path: SPICE网表文件路径
+            devparam_types: 器件参数类型设置（None使用默认）
+            parser_class: 自定义解析器类（None使用默认SPICEParser）
+            这里要根据默认网表解析器进行调整
+        
+        Returns:
+            CircuitAnalyzer实例
+        """
+        # 选择解析器
+        if parser_class is None:
+            parser_class = cls.DefaultSpiceParser
+        
+        # 解析网表
+        parser = parser_class(netlist_path)
+        devices_info = parser.parse()
+        
+        # 自动检测配置完整性
+        config_complete = parser.check_config_complete()
+        
+        # 使用统一入口创建
+        return cls.from_parsed_data(
+            devices_info,
+            config_complete=config_complete
+        )
+    
+    # ==================== 默认网表解析器 ====================
+
+    class DefaultSpiceParser:
+        """
+        默认SPICE网表解析器
+        这里之后要根据实际SPICE网表格式进行扩展和修改
+        支持的格式：
+        - M1 D G S B model w=1u l=500n m=2
+        - R1 PLUS MINUS model r=1k
+        - C1 PLUS MINUS model c=1p
+        
+        可通过继承扩展支持其他格式
+        """
+        
+        # 可覆盖的类变量
+        DEVICE_TYPE_MAP = {
+            "M": "NMOS",
+            "MP": "PMOS",
+            "R": "Resistor",
+            "C": "Capacitor"
+        }
+        
+        PARAM_NAME_MAP = {
+            "w": "fw",      # 宽度
+            "l": "l",       # 长度
+            "m": "m",       # 倍数
+            "r": "segW",    # 电阻宽度（简化映射）
+            "c": "l"        # 电容长度（简化映射）
+        }
+        
+        def __init__(self, netlist_path: str):
+            self.netlist_path = netlist_path
+            self.devices_info = []
+        
+        def parse(self) -> List[List[Any]]:
+            """解析网表文件"""
+            self.devices_info = []
+            
+            with open(self.netlist_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith('*'):
+                        continue
+                    
+                    try:
+                        dev_info = self._parse_line(line)
+                        if dev_info:
+                            self.devices_info.append(dev_info)
+                    except Exception as e:
+                        raise ValueError(f"解析失败行{line_num}: {line}\n错误: {e}")
+            
+            return self.devices_info
+        
+        def _parse_line(self, line: str) -> Optional[List[Any]]:
+            """解析单行器件定义"""
+            parts = line.split()
+            if not parts:
+                return None
+            
+            # 提取器件名称和类型
+            name = parts[0]
+            type_symbol = ''.join(filter(str.isalpha, name[:2]))
+            dev_type = self.DEVICE_TYPE_MAP.get(type_symbol)
+            
+            if not dev_type:
+                print(f"警告: 跳过未知器件 '{name}'")
+                return None
+            
+            # 提取端口（根据类型）
+            terminals = {}
+            if dev_type in ["NMOS", "PMOS"]:
+                terminals = {
+                    "D": parts[1],
+                    "G": parts[2],
+                    "S": parts[3],
+                    "B": parts[4]
+                }
+                param_start = 5
+            else:
+                terminals = {
+                    "PLUS": parts[1],
+                    "MINUS": parts[2]
+                }
+                param_start = 3
+            
+            # 提取参数
+            params = {}
+            for part in parts[param_start:]:
+                if '=' in part:
+                    k, v = part.split('=')
+                    mapped_name = self.PARAM_NAME_MAP.get(k, k)
+                    params[mapped_name] = v
+            
+            return [name, dev_type, terminals, params]
+        
+        def check_config_complete(self) -> bool:
+                """
+                检查所有器件是否配置了所有必需参数
+                
+                Returns:
+                    True: 所有必需参数值非空
+                """
+                if not self.devices_info:
+                    return False
+                
+                for name, dev_type, _, params in self.devices_info:
+                    required_params = CircuitAnalyzer.DEFAULT_PARAM_TYPES.get(dev_type, set())
+                    
+                    # 检查每个必需参数
+                    for req_param in required_params:
+                        if params.get(req_param, "") == "":
+                            print(f"参数不完整: 器件 '{name}' 的 '{req_param}' 为空")
+                            return False
+                
+                return True
+    
+    def _run_analysis_pipeline(self):
+        """
+        执行分析流程
+        
+        根据config_complete标志决定是否执行参数校准
+        这里要跟据参数依赖关系进行调整
+        """
         # -----------------------------------------子结构注册-----------------------------------------------
         self._register_substructure_types()
 
@@ -536,90 +1041,17 @@ class CircuitAnalyzer:
 
         # 5. 登记对称电容
         self._register_sym_capacitors()
-        #-----------------------------------------电路独立参数生成、修改初始解----------------------------------------------
-        # 预保存复制管电流复制比例
-        self._precompute_r_raw_map()
-        # 生成全局约束组
-        self._generate_constraint_groups()
-        # 修改初始解
-        self._calibrate_device_params()
-
-
-    # -------路径换成绝对路径--------
-    #这个函数没有被用到
-    def _normalize_linux_path(self, path: str) -> str:
-        if not path:
-            raise ValueError("路径不能为空字符串")
-        normalized_path = path.replace("\\", "/")
-        return os.path.abspath(normalized_path) if not os.path.isabs(normalized_path) else normalized_path
-
-    # -------------------BIOS-------------------------
-    def _load_aether_circuit(self, lib: str, cell: str, view: str):
-        """仅负责加载Aether电路视图"""
-        try:
-            ae.emyInitAether("-adv")
-        except ae.AetherError as e:
-            raise RuntimeError(
-                "pyAether初始化失败！请检查：\n"
-                "1. Aether库路径是否添加到LD_LIBRARY_PATH\n"
-                f"   示例：export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/aether/lib\n"
-                f"原始错误：{str(e)}"
-            ) from e
-
-        try:
-            # 使用规范化路径
-            normalized_lib = self._normalize_linux_path(lib)
-            self._cv = ae.dbOpenCV(
-                lib=lib,
-                cell=cell,
-                view=view
-            )
-        except ae.AetherError as e:
-            err_msg = str(e).lower()
-            if "library not found" in err_msg:
-                raise FileNotFoundError(f"库'{normalized_lib}'不存在（Linux路径区分大小写）") from e
-            elif "cell not found" in err_msg:
-                raise FileNotFoundError(f"单元'{cell}'不存在于库'{normalized_lib}'中") from e
-            elif "view not found" in err_msg:
-                raise FileNotFoundError(f"视图'{view}'不存在于单元'{cell}'中") from e
-            else:
-                raise RuntimeError(f"打开电路视图失败：{str(e)}") from e
-
-    # ----------------------BOOT，读取器件连接导线、参数、建立网络-器件映射、创建Device实例--------------------------
-    def _init_device_terminals(self):
-        """
-        从pyAether读取端子, 构建 net_device_map 和 Device 实例。
-        包含二极管连接重复添加的修复。
-        """
-        if not self._cv:  # 健壮性检查
-            raise RuntimeError("pyAether (self._cv) 未初始化。无法在Online模式下运行。")
-
-        for device_name, device_type in self.device_types.items():
-            device_inst = ae.dbFindInst(self._cv, device_name)
-            if not device_inst:
-                raise ValueError(f"器件'{device_name}'未在视图中找到（区分大小写）")
-
-            terminals: Dict[str, str] = {}
-            for term in device_inst.instTerms:
-                term_name = str(term.name)
-                net_name = str(term.net.name)
-                if device_type in ["PMOS", "NMOS"] and term_name in ["G", "D", "S", "B"]:
-                    terminals[term_name] = net_name
-                elif device_type in ["Resistor", "Capacitor"] and term_name in ["PLUS", "MINUS"]:
-                    terminals[term_name] = net_name
-
-            # 构建网络-器件映射 (避免二极管连接导致的重复添加)
-            unique_lower_nets = set(net.lower() for net in terminals.values())
-            for net_lower in unique_lower_nets:
-                self.net_device_map[net_lower].append(device_name)
-
-            # 创建基础Device实例
-            self.circuit.devices_dict[device_name] = self.Device(  # <--- (修改) 使用内部类
-                name=device_name,
-                type=device_type,
-                terminals=terminals,
-                params=self._get_valid_device_params(device_name, device_type)
-            )
+        
+        # 条件执行参数调整
+        if self.config_complete:
+            print("[阶段5] 生成约束并校准参数...")
+            self._precompute_r_raw_map()
+            self._generate_constraint_groups()
+            self._calibrate_device_params()
+        else:
+            print("[警告] 参数配置不完整，跳过参数校准")
+            self.constraint_groups = []
+            self.calibrate_params = copy.deepcopy(self.device_params)
 
     # ------------------------------
     # 核心工具方法
@@ -673,21 +1105,6 @@ class CircuitAnalyzer:
                 return True  # 匹配成功
         return False
 
-    # ----------------获取器件除类型外可变参数，用于初始化----------------
-    def _get_valid_device_params(self, device_name: str, device_type: str) -> Dict[str, str]:
-        if device_name not in self.device_params:
-            raise KeyError(f"器件'{device_name}'参数缺失（检查ParameterManager）")
-
-        params = self.device_params[device_name].copy()
-        params.pop("type", None)
-
-        if device_type in ["PMOS", "NMOS"]:
-            required = {"fw", "l", "m"}
-            missing = required - set(params.keys())
-            if missing:
-                raise ValueError(f"MOS管'{device_name}'缺少参数：{missing}")
-        return params
-
     # ------------------连接到电源正端检测--------------------
     def _is_top_node(self, device: 'CircuitAnalyzer.Device') -> bool:
         """
@@ -704,10 +1121,90 @@ class CircuitAnalyzer:
             nets = list(device.terminals.values())
             return any(self._net_matches(net, self.CircuitPorts.POWER_POSITIVE) for net in nets)
         return False
+    
+    # ------------------------------
+    # 4. 核心接口：标签与缓存管理 (Automation Logic)
+    # ------------------------------
+
+    def add_tag(self, device: Union[str, 'CircuitAnalyzer.Device'], tag: str):
+        """
+        [核心接口] 给器件打标签，并自动同步到索引缓存。
+        这是逻辑层唯一修改标签的入口，禁止直接操作 device.tags.add()
+        """
+        if isinstance(device, str):
+            device_obj = self.circuit.devices_dict.get(device)
+            if not device_obj:
+                print(f"[Warning] 尝试给不存在的器件 {device} 打标签 {tag}")
+                return
+        else:
+            device_obj = device
+
+        # 1. 更新 Model
+        if tag not in device_obj.tags:
+            device_obj.tags.add(tag)
+            # 2. 自动同步 Index (Cache)
+            self._tag_index[tag].add(device_obj.name)
+            # print(f"[Debug] Tag Added: {device_obj.name} -> {tag}")
+
+    def remove_tag(self, device: Union[str, 'CircuitAnalyzer.Device'], tag: str):
+        """[核心接口] 移除标签并同步索引"""
+        if isinstance(device, str):
+            device_obj = self.circuit.devices_dict.get(device)
+        else:
+            device_obj = device
+        
+        if device_obj and tag in device_obj.tags:
+            device_obj.tags.remove(tag)
+            self._tag_index[tag].discard(device_obj.name)
+
+    def get_devices_by_tag(self, tag: str) -> List['CircuitAnalyzer.Device']:
+        """
+        [核心接口] O(1) 获取拥有指定标签的所有器件对象
+        """
+        names = self._tag_index.get(tag, set())
+        return [self.circuit.devices_dict[n] for n in names if n in self.circuit.devices_dict]
+
+    def get_names_by_tag(self, tag: str) -> Set[str]:
+        """获取拥有指定标签的所有器件名称"""
+        return self._tag_index.get(tag, set()).copy()
+
+    # ------------------------------
+    # 5. 核心接口：关系管理 (替换特定的 Cache Dicts)
+    # ------------------------------
+
+    def add_relation(self, source: str, relation_type: str, target: str):
+        """
+        记录器件间的关系 (替代 cascode_cache[master] = slaves 这种写法)
+        """
+        self._relation_graph[source][relation_type].append(target)
+
+    def get_relations(self, source: str, relation_type: str) -> List[str]:
+        """获取指定类型的关系目标"""
+        return self._relation_graph[source][relation_type]
+    
+    def add_group(self, group_type: str, members: List[str]):
+        """
+        [核心接口] 记录一组器件 (替代 self.outport_pair.append([...]))
+        保持了 [M1, M2] 这种分组的独立性，不会与其他组混淆。
+        """
+        # 可以在这里做去重检查，如果需要的话
+        self._device_groups[group_type].append(members)
+        # print(f"[Debug] Group Added [{group_type}]: {members}")
+
+    def get_groups(self, group_type: str) -> List[List[str]]:
+        """
+        [核心接口] 获取指定类型的所有分组
+        返回类型: List[List[str]]
+        未来要实现名称-标签-缓存-子结构协同
+        """
+        return self._device_groups[group_type]
 
     # ---------------------------------------------子结构约束函数与子结构注册------------------------------------------------------
     def _register_substructure_types(self):
-        """注册子结构类型及约束规则"""
+        """
+        注册子结构类型及约束规则
+        这里之后要进行大规模重构
+        """
         def pair_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
             """对约束：差分输入对、输出端对、输出对、共模检测A、各种负载
             fw/l/m需相同
@@ -921,15 +1418,15 @@ class CircuitAnalyzer:
                 type_name="差分输入对",
                 required_tags={self.DeviceTags.DIFF_POSITIVE, self.DeviceTags.DIFF_NEGATIVE},
                 constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: lambda
-                    roles: self.DeviceTags.DIFF_POSITIVE in roles and self.DeviceTags.DIFF_NEGATIVE in roles
+                aggregation_rule=lambda roles: 
+                self.DeviceTags.DIFF_POSITIVE in roles and self.DeviceTags.DIFF_NEGATIVE in roles
             ),
             "输出端对": self.SubStructureType(
                 type_name="输出端对",
                 required_tags={self.DeviceTags.OUTPORT_NEGATIVE, self.DeviceTags.OUTPORT_POSITIVE},
                 constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: lambda
-                    roles: self.DeviceTags.OUTPORT_NEGATIVE and self.DeviceTags.OUTPORT_POSITIVE in roles
+                aggregation_rule=lambda roles: 
+                self.DeviceTags.OUTPORT_NEGATIVE and self.DeviceTags.OUTPORT_POSITIVE in roles
             ),
             "级联": self.SubStructureType(
                 type_name="级联",
@@ -958,8 +1455,8 @@ class CircuitAnalyzer:
                 type_name="低压镜像对",
                 required_tags={self.DeviceTags.LV_MIRROR_PAIR},
                 constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: lambda
-                    roles: self.DeviceTags.LV_MIRROR_PAIR in roles
+                aggregation_rule=lambda roles: 
+                self.DeviceTags.LV_MIRROR_PAIR in roles
             ),
             "普通电流镜": self.SubStructureType(
                 type_name="普通电流镜",
@@ -985,8 +1482,7 @@ class CircuitAnalyzer:
                 type_name="C型负载",
                 required_tags={self.DeviceTags.LOAD_C},
                 constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: lambda
-                    roles: self.DeviceTags.LOAD_C in roles
+                aggregation_rule=lambda roles: self.DeviceTags.LOAD_C in roles
             ),
             "典型负载": self.SubStructureType(
                 type_name="典型负载",
@@ -3319,32 +3815,9 @@ class CircuitAnalyzer:
 # ------------------------------
 if __name__ == "__main__":
     # 定义电路和缓存文件
-    lib_path = "2025_EDA_case1"
-    cell_name = "OPA"
-    view_name = "schematic"
 
-    param_file = os.path.join(os.getcwd(), "case1_extractcdfVal_0.txt")
-
-    if not os.path.exists(param_file):
-        raise FileNotFoundError(f"参数文件不存在：{param_file}")
-    # 计算两字典
-    try:
-        param_manager = ParameterManager(param_file)
-    except Exception as e:
-        traceback.print_exc()
-        raise RuntimeError(f"参数管理器初始化失败：{str(e)}") from e
-    # 进行电路分析
-    try:
-        #: 实例化主类
-        analyzer = CircuitAnalyzer(
-            lib=lib_path,
-            cell=cell_name,
-            view=view_name,
-            param_manager=param_manager
-        )
-    except Exception as e:
-        traceback.print_exc()
-        raise RuntimeError(f"分析器初始化失败：{str(e)}") from e
+    netlist_file = "example_circuit.sp"
+    analyzer = CircuitAnalyzer.from_spice_netlist(netlist_file)
 
     # ---  测试代码 ---
     print("\n" + "=" * 30 + " 测试输出 " + "=" * 30)
