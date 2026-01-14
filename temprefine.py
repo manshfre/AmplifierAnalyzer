@@ -2125,194 +2125,205 @@ class CircuitAnalyzer:
                 self.add_relation(lower_ref.name, "lv_mirror_token", m.name)
 
     # -----------------------------------------------------电流路径生成-----------------------------------------------------------
-    #: 确保路径包含网络 ---
     def generate_current_paths(self):
-        """优化电阻基准网络计算，统一子节点与父节点的连接网络"""
+        """
+        从 self.top_nodes 出发，生成从电源到地的所有电流路径。
+        规则修正：
+        严格禁止 NMOS -> PMOS 的逆向连接。
+        两个MOS管之间最多只能有2个电阻，否则无法识别
+        """
         all_paths: List[List[str]] = []
 
-        # ------------------------------
-        # 通用辅助函数
-        # ------------------------------
-        def get_terminals(device: 'CircuitAnalyzer.Device') -> Dict[str, str]:  #
-            """获取器件有效端子-网络映射（源漏/正负端）"""
-            if device.type in ["PMOS", "NMOS"]:
-                return {k: v for k, v in device.terminals.items() if k in ["S", "D"]}
-            elif device.type == "Resistor":
-                return {k: v for k, v in device.terminals.items() if k in ["PLUS", "MINUS"]}
-            return {}
-
-        def get_other_net(device: 'CircuitAnalyzer.Device', known_net: str) -> str:  #
-            """获取器件中与已知网络不同的另一端网络"""
-            nets = list(get_terminals(device).values())
-            # 健壮性检查，防止 nets 列表为空或长度不足
-            if len(nets) < 2:
-                return ""
-            return nets[0] if nets[1] == known_net else nets[1] if nets[0] == known_net else ""
-
-        def get_res_other_net(device: 'CircuitAnalyzer.Device', target_set: Set[str]) -> str:  #
-            """获取电阻非电源的一端网络"""
-            if not device:
-                return ""
-            target_lower = {s.lower() for s in target_set}
-            term_nets = list(get_terminals(device).values())
-            if len(term_nets) < 2:
-                return ""
-            (net1, net2) = term_nets
-            return net1 if net2.lower() in target_lower else net2 if net1.lower() in target_lower else ""
-
-        # 子节点扩展核心逻辑（包含电阻基准网络）
-        # ------------------------------
-        def find_children(current: 'CircuitAnalyzer.Device', parent_net: str = None) -> List[
-            'CircuitAnalyzer.Device']:  #
-            current_type = current.type
-            terminals = get_terminals(current)
-            children: List['CircuitAnalyzer.Device'] = []  #
-
-            if current_type == "NMOS":
-                # 基准网络：NMOS的源极（S）
-                s_net = terminals.get("S")
-                if not s_net:
-                    return []
-
-                # 子节点：漏极接S的其他NMOS
-                children.extend([
-                    d for d in self.circuit.devices_dict.values()
-                    if d.type == "NMOS" and d.name != current.name and d.terminals.get("D") == s_net
-                ])
-
-                # 子节点：一端接S且另一端符合条件的电阻（中间电阻）
-                for res in [d for d in self.circuit.devices_dict.values() if
-                            d.type == "Resistor" and d.name != current.name]:
-                    res_nets = get_terminals(res).values()
-                    if s_net not in res_nets:
-                        continue
-                    other_net = get_other_net(res, s_net)
-                    if not other_net:
-                        continue
-
-                    valid = (self._net_matches(other_net, self.CircuitPorts.POWER_NEGATIVE)) or any(
-                        (d.type == "NMOS" and d.terminals.get("D") == other_net)
-                        for d in self.circuit.devices_dict.values() if d.name != res.name
-                    )
-                    if valid:
-                        children.append(res)
-
-            elif current_type == "PMOS":
-                # 基准网络：PMOS的漏极（D）
-                d_net = terminals.get("D")
-                if not d_net:
-                    return []
-
-                # 子节点：漏极接D的NMOS 或 源极接D的PMOS
-                children.extend([
-                    d for d in self.circuit.devices_dict.values()
-                    if d.name != current.name and (
-                            (d.type == "NMOS" and d.terminals.get("D") == d_net) or
-                            (d.type == "PMOS" and d.terminals.get("S") == d_net)
-                    )
-                ])
-
-                # 子节点：一端接D且另一端符合条件的电阻（中间电阻）
-                for res in [d for d in self.circuit.devices_dict.values() if
-                            d.type == "Resistor" and d.name != current.name]:
-                    res_nets = get_terminals(res).values()
-                    if d_net not in res_nets:
-                        continue
-                    other_net = get_other_net(res, d_net)
-                    if not other_net:
-                        continue
-
-                    valid = (self._net_matches(other_net, self.CircuitPorts.POWER_NEGATIVE)) or any(
-                        (d.type == "NMOS" and d.terminals.get("D") == other_net) or
-                        (d.type == "PMOS" and d.terminals.get("S") == other_net)
-                        for d in self.circuit.devices_dict.values() if d.name != res.name
-                    )
-                    if valid:
-                        children.append(res)
-
-            elif current_type == "Resistor":
-                # 确定电阻的基准网络（区分顶层/中间）
-                if parent_net is not None and parent_net in get_terminals(current).values():
-                    # 中间电阻：基准网络是与父节点连接端相对的另一端
-                    base_net = get_other_net(current, parent_net)
-                else:
-                    # 顶层电阻
-                    base_net = get_res_other_net(current, self.CircuitPorts.POWER_POSITIVE)
-
-                if not base_net:  # <--- 健壮性检查
-                    return []
-
-                # 子节点：漏极接base_net的NMOS 或 源极接base_net的PMOS
-                children.extend([
-                    d for d in self.circuit.devices_dict.values()
-                    if d.name != current.name and (
-                            (d.type == "NMOS" and d.terminals.get("D") == base_net) or
-                            (d.type == "PMOS" and d.terminals.get("S") == base_net)
-                    )
-                ])
-
-            return children
-
-        # ------------------------------
-        # 路径终止判断
-        # ------------------------------
-        def _is_path_terminated(device: 'CircuitAnalyzer.Device') -> bool:  #
-            """判断路径是否终止"""
-            if device.type == "NMOS":
-                return self._net_matches(device.terminals.get("S"), self.CircuitPorts.POWER_NEGATIVE)
-            elif device.type == "PMOS":
-                # 这里其实存在逻辑冗余
-                s_net = device.terminals.get("S")
-                d_net = device.terminals.get("D")
-                return self._net_matches(s_net, self.CircuitPorts.POWER_NEGATIVE) or self._net_matches(d_net, self.CircuitPorts.POWER_NEGATIVE)
-            elif device.type == "Resistor":
-                nets = list(device.terminals.values())
-                return any(self._net_matches(net, self.CircuitPorts.POWER_NEGATIVE) for net in nets)
-            return False
-
-        # ------------------------------
-        # DFS函数（优化子节点与父节点的连接网络计算）
-        # ------------------------------
-        def dfs(current: 'CircuitAnalyzer.Device', path: List[str], parent_net: str = None):  #
-            if current.name in path:
-                return  # 避免同路径环路
-
-            new_path = path + [current.name]
-            if _is_path_terminated(current):
-                all_paths.append(new_path)
+        # 内部 DFS 函数
+        def dfs(current_dev: 'CircuitAnalyzer.Device', current_path: List[str], incoming_net: str = None):
+            # 1. 环路检测
+            if current_dev.name in current_path[::2]:
                 return
 
-            # 计算当前节点的基准网络（所有子节点与当前节点的连接网络均为此网络）
-            current_type = current.type
-            current_terminals = get_terminals(current)
-            # 父节点的基准网络：子节点与当前节点连接的网络（统一为当前节点的扩展基准）
-            if current_type == "NMOS":
-                child_parent_net = current_terminals.get("S")  # NMOS的扩展基准是S
-            elif current_type == "PMOS":
-                child_parent_net = current_terminals.get("D")  # PMOS的扩展基准是D
-            elif current_type == "Resistor":
-                # 电阻的扩展基准是其base_net（已在find_children中确定）
-                # 子节点与电阻的连接网络即base_net
-                if parent_net is not None:
-                    child_parent_net = get_other_net(current, parent_net)  # 中间电阻的base_net
-                else:
-                    child_parent_net = get_res_other_net(current, self.CircuitPorts.POWER_POSITIVE)  # 顶层电阻的base_net
-            else:
-                child_parent_net = None
+            # 2. 加入当前路径
+            new_path_with_dev = current_path + [current_dev.name]
 
-            # 健壮性检查
-            if child_parent_net is None:
+            # 3. 获取流出网络
+            out_net = self._get_device_output_net(current_dev, incoming_net)
+            if not out_net:
+                return 
+
+            # 4. 终止条件判断 (到达地)
+            if self._is_net_ground(out_net):
+                all_paths.append(new_path_with_dev + [out_net])
                 return
 
-            # 递归处理所有子节点，共享同一个child_parent_net
-            for child in find_children(current, parent_net):
-                # --- (修改) 将内部网络添加到路径中 ---
-                dfs(child, new_path + [child_parent_net], child_parent_net)
+            # 5. 寻找下一级器件
+            # 必须传入 current_dev 以便进行父节点类型校验 (如 NMOS 不接 PMOS)
+            next_devices = self._find_valid_next_devices(out_net, current_dev)
+            
+            if not next_devices:
+                return 
+
+            # 6. 递归
+            path_to_pass = new_path_with_dev + [out_net]
+            for next_dev in next_devices:
+                dfs(next_dev, path_to_pass, incoming_net=out_net)
+
+        # --- 主循环 ---
+        if not self.top_nodes:
+            print("警告: 未识别到顶层节点，无法生成电流路径。")
+            return
 
         for node in self.top_nodes:
-            dfs(node, [], parent_net=None)
+            # 特殊处理：顶层电阻校验
+            if node.type == "Resistor":
+                power_net = next((net for net in node.terminals.values() if self._is_net_power(net)), None)
+                # 顶层电阻视为父节点是 POWER
+                if not self._check_resistor_validity(node, power_net, "POWER"):
+                    continue 
+
+            dfs(node, [], incoming_net=None)
 
         self.circuit.current_paths = all_paths
+        print(f"信息: 生成了 {len(all_paths)} 条电流路径。")
+
+    # ------------------------------
+    # 辅助方法：寻找有效的下一级器件 
+    # ------------------------------
+    def _find_valid_next_devices(self, net_name: str, parent_dev: 'CircuitAnalyzer.Device') -> List['CircuitAnalyzer.Device']:
+        """
+        在 net_name 上寻找下一级器件。
+        规则修正：
+        1. 排除自己。
+        2. NMOS -> PMOS 是非法路径 (禁止)。
+        3. NMOS -> NMOS(D) 合法。
+        4. PMOS -> PMOS(S) / NMOS(D) 合法。
+        5. Resistor 需进行 Look-ahead 校验)(实际是校验NMOS/PMOS连接合法性)。
+        """
+        candidates = []
+        device_names_on_net = self.net_device_map.get(net_name.lower(), [])
+        
+        parent_type = parent_dev.type
+
+        for name in device_names_on_net:
+            if name == parent_dev.name: continue
+            
+            dev = self.circuit.devices_dict.get(name)
+            if not dev: continue
+
+            is_valid = False
+            
+            # --- Case 1: 下一级是 NMOS ---
+            if dev.type == "NMOS":
+                # 无论父节点是 PMOS/NMOS/Res，下一级 NMOS 必须漏极 (D) 输入
+                if self._net_matches(dev.terminals.get("D"), {net_name}):
+                    is_valid = True
+            
+            # --- Case 2: 下一级是 PMOS ---
+            elif dev.type == "PMOS":
+                # [修正逻辑]: 如果父节点是 NMOS，禁止连接到 PMOS
+                if parent_type == "NMOS":
+                    is_valid = False
+                else:
+                    # 父节点是 PMOS 或 Resistor(且经过校验)
+                    # PMOS 必须源极 (S) 输入 (例如 Cascode)
+                    if self._net_matches(dev.terminals.get("S"), {net_name}):
+                        is_valid = True
+            
+            # --- Case 3: 下一级是 Resistor ---
+            elif dev.type == "Resistor":
+                # 必须进行“前瞻校验”
+                if self._check_resistor_validity(dev, net_name, parent_type):
+                    is_valid = True
+
+            if is_valid:
+                candidates.append(dev)
+        
+        return candidates
+
+    # ------------------------------
+    # 辅助方法：电阻连接规则校验 (逻辑确认)
+    # ------------------------------
+    def _check_resistor_validity(self, resistor: 'CircuitAnalyzer.Device', input_net: str, parent_type: str) -> bool:
+        """
+        检查电阻的有效性。
+        逻辑：Parent -> Resistor(input) -> Resistor(target) -> Target Devices
+        
+        校验规则：
+        1. POWER -> Res -> NMOS(D) / PMOS(S) / GND
+        2. NMOS  -> Res -> NMOS(D) / GND  (禁止 PMOS)
+        3. PMOS  -> Res -> NMOS(D) / PMOS(S) / GND
+        """
+        # 1. 获取电阻另一端
+        target_net = self._get_device_output_net(resistor, input_net)
+        if not target_net: return False
+
+        # 2. 接地总是合法的
+        if self._is_net_ground(target_net):
+            return True
+
+        # 3. 检查 Target Net 上的器件
+        devices_on_target = self.net_device_map.get(target_net.lower(), [])
+        has_valid_connection = False
+
+        for name in devices_on_target:
+            if name == resistor.name: continue
+            target_dev = self.circuit.devices_dict.get(name)
+            if not target_dev: continue
+
+            # --- 规则 A: POWER -> Res ---
+            if parent_type == "POWER":
+                # 允许: NMOS(D) 或 PMOS(S)
+                if target_dev.type == "NMOS" and self._net_matches(target_dev.terminals.get("D"), {target_net}):
+                    has_valid_connection = True
+                elif target_dev.type == "PMOS" and self._net_matches(target_dev.terminals.get("S"), {target_net}):
+                    has_valid_connection = True
+
+            # --- 规则 B: NMOS -> Res ---
+            elif parent_type == "NMOS":
+                # [修正逻辑]: 严格限制，只允许 NMOS(D)，禁止 PMOS
+                if target_dev.type == "NMOS" and self._net_matches(target_dev.terminals.get("D"), {target_net}):
+                    has_valid_connection = True
+                # PMOS 在此情况不被允许，不做任何操作
+
+            # --- 规则 C: PMOS -> Res ---
+            elif parent_type == "PMOS":
+                # 允许: NMOS(D) 或 PMOS(S)
+                if target_dev.type == "NMOS" and self._net_matches(target_dev.terminals.get("D"), {target_net}):
+                    has_valid_connection = True
+                elif target_dev.type == "PMOS" and self._net_matches(target_dev.terminals.get("S"), {target_net}):
+                    has_valid_connection = True
+            
+            if has_valid_connection:
+                break
+
+        return has_valid_connection
+
+    # ------------------------------
+    # 辅助方法：获取器件流出网络 (保持不变)
+    # ------------------------------
+    def _get_device_output_net(self, device: 'CircuitAnalyzer.Device', incoming_net: str = None) -> Optional[str]:
+        if device.type == "NMOS":
+            return device.terminals.get("S")
+        elif device.type == "PMOS":
+            return device.terminals.get("D")
+        elif device.type == "Resistor":
+            net1 = device.terminals.get("PLUS")
+            net2 = device.terminals.get("MINUS")
+            if incoming_net:
+                if self._net_matches(net1, {incoming_net}): return net2
+                if self._net_matches(net2, {incoming_net}): return net1
+            else:
+                is_net1_pwr = self._is_net_power(net1)
+                is_net2_pwr = self._is_net_power(net2)
+                if is_net1_pwr: return net2
+                if is_net2_pwr: return net1
+        return None
+
+    # ------------------------------
+    # 辅助方法：电源检测 (简化复用)
+    # ------------------------------
+    def _is_net_power(self, net_name: str) -> bool:
+        return self._net_matches(net_name, self.CircuitPorts.POWER_POSITIVE)
+    
+    def _is_net_ground(self, net_name: str) -> bool:
+        return self._net_matches(net_name, self.CircuitPorts.POWER_NEGATIVE)
 
     # -----------------------------------------------------电流束生成、电流束路径生成、电流束管标记-----------------------------------------------------------
     def analyze_current_beams(self):
