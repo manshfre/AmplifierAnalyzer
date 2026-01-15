@@ -22,7 +22,7 @@ class CircuitAnalyzer:
     """
     电路分析器 (CircuitAnalyzer)
     调用后可对电路的子结构进行分析、对参数进行精简、对初始解进行修改
-    DeviceTags、CircuitPorts、SubStructureType、DPPConfig是这个分析器的工具，代表这个分析器可以识别的器件标签、特殊端口名称、子结构类型、分析器数据接口格式。
+    DeviceTags、CircuitPorts、SubStructureType、APPConfig是这个分析器的工具，代表这个分析器可以识别的器件标签、特殊端口名称、子结构类型、分析器数据接口格式。
     Device是该分析器识别到的器件、DeviceSub是器件所属子结构实例的引用
     Circuit是该分析器识别到的电路、CircuitSub是在Circuit中识别出的子结构实例
     子结构要先注册到SubStructureType中，才能被识别并登记到CircuitSub中与DeviceSub中
@@ -416,213 +416,159 @@ class CircuitAnalyzer:
         # 电流束网络
         beam_net_sets: Dict[str, Set[str]] = field(default_factory=dict)
 
-    class DPPConfig:
+    class APPConfig:
         """
-        器件-端口-参数配置中心（Device-Port-Parameter Configuration）
+        别名-端口-参数配置中心（Alias-Port-Parameter Configuration）
         
+        设计原则：
+        1. 稳定性：ALIAS_CONFIG 与 PORT_CONFIG 定义物理实体，禁止修改已有条目，允许新增条目，警告删除条目。
+        2. 灵活性：PARAM_CONFIG 服务于算法逻辑，允许增删改。
+        3. 关联性：任何增删操作都会触发关联检查提示，确保逻辑闭环。
+
         此类定义了从网表解析到分析全过程的数据格式契约，包含三个不可变键的字典：
-        1. DEVICE_CONFIG: 定义分析器对器件类型的引用格式，验证devices_information[1]）
+        1. ALIAS_CONFIG: 定义分析器对器件类型的引用格式，验证devices_information[1]）
         2. PORT_CONFIG: 定义分析器对器件端口的引用格式，验证devices_information[2]的键）
         3. PARAM_CONFIG: 定义分析器对器件参数的引用格式，验证devices_information[3]的键）
-        这里要修改PORT_CONFIG和PARAM_CONFIG的键与值，以后子结构注册与参数约束、参数校验都会用到
         
         键的约束：
         - NMOS与PMOS的PORT_CONFIG必须相等
         - CAPACITOR与RESISTOR的PORT_CONFIG必须相等
         - NMOS与PMOS的PARAM_CONFIG必须相等
-        后续可以优化，目前仅支持上述四种器件类型。
+        这种关联性后续要进行处理
         
         **键（大写标识符）代表逻辑上的各种器件类型，不可增删改，仅可修改其对应值**
         """
         
-        # ==================== 1. 器件类型配置字典 ====================
-        # 键: 大写类型标识符（固定）
-        # 值: 该实际器件类型在分析器中对应的唯一器件类型名字符串（可配置）
-        # 作用: 验证 devices_information[1] 的合法性
-        DEVICE_CONFIG = {
-            "NMOS": "NMOS",           # 本分析器用“NMOS”来指代逻辑上的NMOS管
-            "PMOS": "PMOS",           # 本分析器用“PMOS”来指代逻辑上的PMOS管
-            "CAPACITOR": "Capacitor", # 本分析器用“Capacitor”来指代逻辑上的电容
-            "RESISTOR": "Resistor"    # 本分析器用“Resistor”来指代逻辑上的电阻
+        # ==================== 1. 核心存储 ====================
+        # 键: 大写类型标识符 (Internal ID)
+        # 值: 分析器中的别名 (Alias)
+        ALIAS_CONFIG = {
+            "NMOS": "NMOS",
+            "PMOS": "PMOS",
+            "CAPACITOR": "Capacitor",
+            "RESISTOR": "Resistor"
         }
         
-        # ==================== 2. 器件端口配置字典 ====================
-        # 键: 大写类型标识符（固定）
-        # 值: 合法的端口名称集合（可配置）
-        # 作用: 验证 devices_information[2] 的键的合法性
-        #
-        # 设计约束：
-        # - NMOS与PMOS的端口集合必须相等
-        # - CAPACITOR与RESISTOR的端口集合必须相等
+        # 键: 大写类型标识符
+        # 值: 合法的端口名称集合
         PORT_CONFIG = {
-            "NMOS": {"G", "D", "S", "B"},      # MOS管四端口
-            "PMOS": {"G", "D", "S", "B"},      # 必须与NMOS完全相同
-            "CAPACITOR": {"PLUS", "MINUS"},    # 二端器件
-            "RESISTOR": {"PLUS", "MINUS"}      # 必须与CAPACITOR完全相同
+            "NMOS": {"G", "D", "S", "B"},
+            "PMOS": {"G", "D", "S", "B"},
+            "CAPACITOR": {"PLUS", "MINUS"},
+            "RESISTOR": {"PLUS", "MINUS"}
         }
         
-        # ==================== 3. 器件参数类型配置字典 ====================
-        # 键: 大写类型标识符（固定）
-        # 值: 合法的参数名称集合（可配置）
-        # 作用: 验证 devices_information[3] 的键的合法性
-        #
-        # 设计约束：
-        # - NMOS与PMOS的参数集合必须相等
+        # 键: 大写类型标识符
+        # 值: 合法的参数名称集合
         PARAM_CONFIG = {
-            "NMOS": {"m", "fw", "l"},          # 倍数、宽度、长度
-            "PMOS": {"m", "fw", "l"},          # 必须与NMOS完全相同
-            "CAPACITOR": {"l"},                # 长度（或电容值）
-            "RESISTOR": {"segW", "segL"}       # 宽度、长度
+            "NMOS": {"m", "fw", "l"},
+            "PMOS": {"m", "fw", "l"},
+            "CAPACITOR": {"l"},
+            "RESISTOR": {"segW", "segL"}
         }
-        
-        # ==================== 查询方法 ====================
+
+        # ==================== 2. DEVICE & PORT (严格模式) ====================
+
+        @classmethod
+        def add_device_type(cls, key: str, default_alias: str) -> None:
+            """
+            [新增] 新增器件类型标识符
+            注意：禁止修改已有条目。
+            """
+            if key in cls.ALIAS_CONFIG:
+                raise ValueError(f"[APPConfig] 禁止修改已有器件类型 '{key}'。物理实体定义不应随意变更。")
+            
+            cls.ALIAS_CONFIG[key] = default_alias
+            print(f"[APPConfig] 新增器件类型: {key} (别名: {default_alias})")
+            print(f"  RefCheck -> 请检查是否已设计该器件别名相关处理逻辑？")
+            print(f"  RefCheck -> 请检查是否已配置 PORT_CONFIG[{key}] 并设计了相关端口处理逻辑？")
+            print(f"  RefCheck -> 请检查是否已配置 PARAM_CONFIG[{key}] 并设计了相关参数处理逻辑？")
+
+        @classmethod
+        def add_port_config(cls, key: str, ports: Set[str]) -> None:
+            """
+            [新增] 新增端口定义
+            注意：禁止修改已有条目。
+            """
+            if key in cls.PORT_CONFIG:
+                raise ValueError(f"[APPConfig] 禁止修改已有端口定义 '{key}'。物理端口不应随意变更。")
+            
+            cls.PORT_CONFIG[key] = ports.copy()
+            print(f"[APPConfig] 新增端口定义: {key} -> {ports}")
+            print(f"  RefCheck -> 请确认该端口集合是否完整描述了器件物理特性？")
+            print(f"  RefCheck -> 请检查是否有相关逻辑处理这些端口（如栅极识别等）？")
+            print(f"  RefCheck -> 请检查是否已配置 ALIAS_CONFIG[{key}] 并设计了相关器件处理逻辑？")
+            print(f"  RefCheck -> 请检查是否已配置 PARAM_CONFIG[{key}] 并设计了相关参数处理逻辑？")
+
+        @classmethod
+        def remove_entry_strictly(cls, key: str) -> None:
+            """
+            [删除] 删减 DEVICE/PORT 条目
+            警告：高风险操作。
+            """
+            if key not in cls.ALIAS_CONFIG and key not in cls.PORT_CONFIG:
+                print(f"[APPConfig] 警告: 尝试删除不存在的键 '{key}'")
+                return
+
+            print(f"[APPConfig] 警告: 正在删除核心定义 '{key}'！")
+            print(f"  RiskCheck -> 请检查现有分析器逻辑是否与被删除器件类型完全无关？")
+            print(f"  RiskCheck -> 请检查另外两字典条目是否也应一并删除？")
+            
+            if key in cls.ALIAS_CONFIG:
+                del cls.ALIAS_CONFIG[key]
+                print(f"  - 已删除 ALIAS_CONFIG[{key}]")
+            
+            if key in cls.PORT_CONFIG:
+                del cls.PORT_CONFIG[key]
+                print(f"  - 已删除 PORT_CONFIG[{key}]")
+
+        # ==================== 3. PARAM (灵活模式) ====================
+
+        @classmethod
+        def update_param_config(cls, key: str, params: Set[str]) -> None:
+            """
+            [增/删/改] 配置参数集合
+            允许覆盖已有配置，因为算法变更会导致参数需求变更。
+            """
+            is_new = key not in cls.PARAM_CONFIG
+            
+            if not is_new:
+                print(f"[APPConfig] 修改已有参数配置: {key}")
+                print(f"  LogicCheck -> 请检查现有参数校准/约束逻辑是否适配修改后的参数列表？")
+            else:
+                print(f"[APPConfig] 新增参数配置: {key}")
+                print(f"  RefCheck -> 请确保 ALIAS_CONFIG[{key}] 和 PORT_CONFIG[{key}] 已存在。")
+                print(f"  LogicCheck -> 请确保已实现对应的参数提取与校准逻辑。")
+
+            cls.PARAM_CONFIG[key] = params.copy()
+            print(f"  - 当前 {key} 参数集合: {params}")
+
+        # ==================== 4. 查询接口 (保持不变) ====================
         
         @classmethod
         def get_device_alias(cls, key: str) -> str:
-            """
-            获取指定标识符对应的器件类型名字符串
-            
-            参数:
-                key: 大写类型标识符，如 "NMOS", "CAPACITOR"
-            
-            返回:
-                该标识符当前映射的器件类型名
-                
-            示例:
-                >>> DPPConfig.get_device_alias("NMOS")
-                'NMOS'
-            """
-            if key not in cls.DEVICE_CONFIG:
-                raise KeyError(f"未知类型标识符 '{key}'，有效值为: {list(cls.DEVICE_CONFIG.keys())}")
-            return cls.DEVICE_CONFIG[key]
+            if key not in cls.ALIAS_CONFIG:
+                raise KeyError(f"未知类型标识符 '{key}'")
+            return cls.ALIAS_CONFIG[key]
         
         @classmethod
+        def get_identifier_by_type(cls, device_type: str) -> str:
+            for key, type_name in cls.ALIAS_CONFIG.items():
+                if device_type == type_name:
+                    return key
+            raise ValueError(f"未知器件类型字符串 '{device_type}'")
+
+        @classmethod
         def get_legal_ports(cls, key: str) -> Set[str]:
-            """
-            获取指定标识符对应的合法端口名称集合
-            
-            参数:
-                key: 大写类型标识符
-            
-            返回:
-                该标识符允许的端口名称集合
-                
-            示例:
-                >>> DPPConfig.get_legal_ports("NMOS")
-                {'G', 'D', 'S', 'B'}
-            """
             if key not in cls.PORT_CONFIG:
-                raise KeyError(f"未知类型标识符 '{key}'，有效值为: {list(cls.PORT_CONFIG.keys())}")
+                raise KeyError(f"未配置端口 '{key}'")
             return cls.PORT_CONFIG[key].copy()
         
         @classmethod
         def get_legal_params(cls, key: str) -> Set[str]:
-            """
-            获取指定标识符对应的合法参数名称集合
-            
-            参数:
-                key: 大写类型标识符
-            
-            返回:
-                该标识符允许的参数名称集合
-                
-            示例:
-                >>> DPPConfig.get_legal_params("NMOS")
-                {'m', 'fw', 'l'}
-            """
             if key not in cls.PARAM_CONFIG:
-                raise KeyError(f"未知类型标识符 '{key}'，有效值为: {list(cls.PARAM_CONFIG.keys())}")
+                raise KeyError(f"未配置参数 '{key}'")
             return cls.PARAM_CONFIG[key].copy()
-        
-        # ==================== 动态配置方法 ====================
-        
-        @classmethod
-        def set_device_config(cls, key: str, type_name: str) -> None:
-            """
-            设置指定标识符对应的器件类型名字符串
-            
-            参数:
-                key: 大写类型标识符
-                type_name: 新的器件类型名字符串
-                
-            异常:
-                KeyError: 标识符不存在
-                
-            示例:
-                >>> DPPConfig.set_device_config("NMOS", "N")
-                # 现在解析器必须输出 type="N" 而非 type="NMOS"
-            """
-            if key not in cls.DEVICE_CONFIG:
-                raise KeyError(f"未知类型标识符 '{key}'")
-            
-            cls.DEVICE_CONFIG[key] = type_name
-            print(f"[DPPConfig] 已更新 {key} 的引用格式: '{type_name}'")
-        
-        @classmethod
-        def set_port_config(cls, key: str, ports: Set[str]) -> None:
-            """
-            设置指定标识符对应的合法端口名称集合
-            
-            约束说明：
-            - 若修改"NMOS"，则自动同步修改"PMOS"
-            - 若修改"PMOS"，则自动同步修改"NMOS"
-            - 若修改"CAPACITOR"，则自动同步修改"RESISTOR"
-            - 若修改"RESISTOR"，则自动同步修改"CAPACITOR"
-            
-            参数:
-                key: 大写类型标识符
-                ports: 新的端口名称集合
-            """
-            if key not in cls.PORT_CONFIG:
-                raise KeyError(f"未知类型标识符 '{key}'")
-            
-            # 应用更新
-            cls.PORT_CONFIG[key] = ports.copy()
-            
-            # 自动同步关联标识符
-            if key == "NMOS":
-                cls.PORT_CONFIG["PMOS"] = ports.copy()
-                print(f"[DPPconfig] 自动同步: PMOS端口已更新为 {ports}")
-            elif key == "PMOS":
-                cls.PORT_CONFIG["NMOS"] = ports.copy()
-                print(f"[DPPconfig] 自动同步: NMOS端口已更新为 {ports}")
-            elif key == "CAPACITOR":
-                cls.PORT_CONFIG["RESISTOR"] = ports.copy()
-                print(f"[DPPconfig] 自动同步: RESISTOR端口已更新为 {ports}")
-            elif key == "RESISTOR":
-                cls.PORT_CONFIG["CAPACITOR"] = ports.copy()
-                print(f"[DPPconfig] 自动同步: CAPACITOR端口已更新为 {ports}")
-            
-            print(f"[DPPconfig] 已更新 {key} 的合法端口: {ports}")
-        
-        @classmethod
-        def set_param_config(cls, key: str, params: Set[str]) -> None:
-            """
-            设置指定标识符对应的合法参数名称集合
-            
-            约束说明：
-            - 若修改"NMOS"，则自动同步修改"PMOS"
-            - 若修改"PMOS"，则自动同步修改"NMOS"
-            
-            参数:
-                key: 大写类型标识符
-                params: 新的参数名称集合
-            """
-            if key not in cls.PARAM_CONFIG:
-                raise KeyError(f"未知类型标识符 '{key}'")
-            
-            # 应用更新
-            cls.PARAM_CONFIG[key] = params.copy()
-            
-            # 自动同步关联标识符
-            if key == "NMOS":
-                cls.PARAM_CONFIG["PMOS"] = params.copy()
-                print(f"[DPPconfig] 自动同步: PMOS参数已更新为 {params}")
-            elif key == "PMOS":
-                cls.PARAM_CONFIG["NMOS"] = params.copy()
-                print(f"[DPPconfig] 自动同步: NMOS参数已更新为 {params}")
-            
-            print(f"[DPPconfig] 已更新 {key} 的合法参数: {params}")
         
         @classmethod
         def reset_to_defaults(cls) -> None:
@@ -631,7 +577,7 @@ class CircuitAnalyzer:
             
             警告: 此操作会丢失所有自定义配置
             """
-            cls.DEVICE_CONFIG = {
+            cls.ALIAS_CONFIG = {
                 "NMOS": "NMOS",
                 "PMOS": "PMOS",
                 "CAPACITOR": "Capacitor",
@@ -649,45 +595,22 @@ class CircuitAnalyzer:
                 "CAPACITOR": {"l"},
                 "RESISTOR": {"segW", "segL"}
             }
-            print("[DPPConfig] 已重置所有配置为默认值")
-        
-        # ==================== 辅助查询方法 ====================
-        
-        @classmethod
-        def get_identifier_by_type(cls, device_type: str) -> str:
-            """
-            反向查询：根据器件类型字符串获取其大写标识符，在校验devices_information[1]时使用
-            
-            参数:
-                device_type: 解析器输出的器件类型字符串（如"NMOS", "N"）
-            
-            返回:
-                对应的大写标识符（如"NMOS"）
-            
-            示例:
-                >>> DPPConfig.set_device_config("NMOS", "N")
-                >>> DPPConfig.get_identifier_by_type("N")
-                'NMOS'
-            """
-            for key, type_name in cls.DEVICE_CONFIG.items():
-                if device_type == type_name:
-                    return key
-            raise ValueError(f"未知器件类型字符串 '{device_type}'，未在任何标识符中注册")
-        
+            print("[APPConfig] 已重置所有配置为默认值")
+
         @classmethod
         def list_all_identifiers(cls) -> List[str]:
             """列出所有大写类型标识符"""
-            return list(cls.DEVICE_CONFIG.keys())
+            return list(cls.ALIAS_CONFIG.keys())
         
         @classmethod
         def get_config_summary(cls) -> Dict[str, Dict]:
             """
-            获取当前DPP配置
+            获取当前APP配置
             
             返回:
                 {
                     "NMOS": {
-                        "type": "NMOS",
+                        "alias": "NMOS",
                         "ports": {"G", "D", "S", "B"},
                         "params": {"m", "fw", "l"}
                     },
@@ -696,11 +619,11 @@ class CircuitAnalyzer:
             """
             return {
                 key: {
-                    "type": cls.DEVICE_CONFIG[key],
+                    "alias": cls.ALIAS_CONFIG[key],
                     "ports": cls.PORT_CONFIG[key].copy(),
                     "params": cls.PARAM_CONFIG[key].copy()
                 }
-                for key in cls.DEVICE_CONFIG.keys()
+                for key in cls.ALIAS_CONFIG.keys()
             }
 
     # ------------------------------
@@ -791,10 +714,10 @@ class CircuitAnalyzer:
         """
         校验网表解析数据，实例化Device，创建分析器
 
-        验证契约（由DPPConfig强制执行）：
-        - devices_information[i][1] 必须等于 DPPConfig.DEVICE_CONFIG[identifier]
-        - devices_information[i][2] 的键必须是 DPPConfig.PORT_CONFIG[identifier] 的子集
-        - devices_information[i][3] 的键必须是 DPPConfig.PARAM_CONFIG[identifier] 的子集
+        验证契约（由APPConfig强制执行）：
+        - devices_information[i][1] 必须等于 APPConfig.ALIAS_CONFIG[identifier]
+        - devices_information[i][2] 的键必须是 APPConfig.PORT_CONFIG[identifier] 的子集
+        - devices_information[i][3] 的键必须是 APPConfig.PARAM_CONFIG[identifier] 的子集
         """
         analyzer = cls()
         analyzer.config_complete = config_complete
@@ -802,24 +725,24 @@ class CircuitAnalyzer:
         if not isinstance(devices_information, list):
             raise TypeError("devices_information必须是列表")
 
-        # DPPConfig验证
+        # APPConfig验证
         for idx, dev_info in enumerate(devices_information):
             if len(dev_info) != 4:
                 raise ValueError(f"器件信息格式错误（索引{idx}）: 期望4元素，实际{len(dev_info)}")
 
             # 验证器件类型引用格式
             dev_type_str = dev_info[1]
-            identifier = cls.DPPConfig.get_identifier_by_type(dev_type_str)
+            identifier = cls.APPConfig.get_identifier_by_type(dev_type_str)
             
             # 验证端口配置与格式
             terminals = dev_info[2]
-            legal_ports = cls.DPPConfig.get_legal_ports(identifier)
+            legal_ports = cls.APPConfig.get_legal_ports(identifier)
             if not set(terminals.keys()).issubset(legal_ports):
                 raise ValueError(f"器件 '{dev_info[0]}' 端口非法")
             
             # 验证参数类型与格式
             params = dev_info[3]
-            legal_params = cls.DPPConfig.get_legal_params(identifier)
+            legal_params = cls.APPConfig.get_legal_params(identifier)
             if not set(params.keys()).issubset(legal_params):
                 raise ValueError(f"器件 '{dev_info[0]}' 参数非法")
         
