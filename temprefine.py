@@ -2331,131 +2331,138 @@ class CircuitAnalyzer:
         根据定义的规则获取电流束。
         必须在 generate_current_paths() 之后调用。
         使用 [Dev, Net, Dev] 格式，并提取内部网络集合。
+        
+        优先级顺序：
+        1. 4管共模检测 (CMFB)
+        2. 差分输入对
+        3. 输出管
+        4. 输出管栅极关联
+        5. 公共器件索引匹配
         """
         # 0. 确保电流路径已生成
         if not self.circuit.current_paths:
             print("警告：电流路径未生成，请先调用 generate_current_paths()")
+            return
 
         # 复制一份路径列表，以便安全地从中移除
-        # 使用元组的集合 (set of tuples) 来方便地进行 O(1) 查找和移除
         remaining_paths: Set[tuple] = {tuple(path) for path in self.circuit.current_paths}
         beams: Dict[str, List[List[str]]] = {}
 
-        # -----------------------------------------------------
-        # 规则 1: 所有包含差分输入管在内的电流路径
-        # -----------------------------------------------------
-        #
-        beam1_devices = set(self.diff_pair_positive) | set(self.diff_pair_negative)
+        # =====================================================
+        # 规则 1: 4管共模检测 (优先级最高)
+        # =====================================================
+        # 获取所有标记为 COMMON_4MOS 的器件名称
+        beamb_devices = self.get_names_by_tag(self.DeviceTags.COMMON_4MOS)
         beam1_paths: Set[tuple] = set()
 
-        if beam1_devices:
+        if beamb_devices:
             for path in remaining_paths:
-                path_devs = path[::2]  # <--- (修改) 适配 [Dev, Net, Dev]
-                if any(device_name in beam1_devices for device_name in path_devs):
+                path_devs = path[::2]  # 提取器件
+                if any(device_name in beamb_devices for device_name in path_devs):
                     beam1_paths.add(path)
 
         if beam1_paths:
-            beams["beam_1_differential"] = [list(p) for p in beam1_paths]
-            remaining_paths -= beam1_paths  # 从剩余路径中移除
+            beams["beam_1_cmfb"] = [list(p) for p in beam1_paths]
+            remaining_paths -= beam1_paths
 
-        # -----------------------------------------------------
-        # 规则 2: （剩余路径中）所有包含输出管的电流路径
-        # -----------------------------------------------------
-        #
-        beam2_devices = set(self.positive_outport) | set(self.negative_outport)
+        # =====================================================
+        # 规则 2: 差分输入对 (原规则 1)
+        # =====================================================
+        diff_pos = self.get_names_by_tag(self.DeviceTags.DIFF_POSITIVE)
+        diff_neg = self.get_names_by_tag(self.DeviceTags.DIFF_NEGATIVE)
+        beam2_devices = diff_pos | diff_neg
         beam2_paths: Set[tuple] = set()
 
         if beam2_devices:
             for path in remaining_paths:
-                path_devs = path[::2]  # <--- (修改) 适配 [Dev, Net, Dev]
+                path_devs = path[::2]
                 if any(device_name in beam2_devices for device_name in path_devs):
                     beam2_paths.add(path)
 
         if beam2_paths:
-            beams["beam_2_output"] = [list(p) for p in beam2_paths]
+            beams["beam_2_differential"] = [list(p) for p in beam2_paths]
             remaining_paths -= beam2_paths
 
-        # -----------------------------------------------------
-        # 规则 2.5: 4管共模检测
-        # -----------------------------------------------------
-        #
-        beamb_devices = self.common_detect4
-        beamb_paths: Set[tuple] = set()
+        # =====================================================
+        # 规则 3: 输出管 (原规则 2)
+        # =====================================================
+        out_pos = self.get_names_by_tag(self.DeviceTags.OUTPORT_POSITIVE)
+        out_neg = self.get_names_by_tag(self.DeviceTags.OUTPORT_NEGATIVE)
+        beam3_devices = out_pos | out_neg
+        beam3_paths: Set[tuple] = set()
 
-        if beamb_devices:
+        if beam3_devices:
             for path in remaining_paths:
-                path_devs = path[::2]  # <--- (修改) 适配 [Dev, Net, Dev]
-                if any(device_name in beamb_devices for device_name in path_devs):
-                    beamb_paths.add(path)
+                path_devs = path[::2]
+                if any(device_name in beam3_devices for device_name in path_devs):
+                    beam3_paths.add(path)
 
-        if beamb_paths:
-            beams["beam_b_output"] = [list(p) for p in beamb_paths]
-            remaining_paths -= beamb_paths
+        if beam3_paths:
+            beams["beam_3_output"] = [list(p) for p in beam3_paths]
+            remaining_paths -= beam3_paths
 
-        # -----------------------------------------------------
-        # 规则 3: （剩余路径中）所有包含输出管栅极对应的网络的、且包含器件数量相等的电流路径(这里逻辑或许可以优化)
-        # -----------------------------------------------------
-        # 3a. 找出所有输出管的栅极网络
+        # =====================================================
+        # 规则 4: 输出管栅极关联路径 (逻辑保持不变)
+        # =====================================================
+        # 4a. 找出所有输出管的栅极网络
         out_gate_nets: Set[str] = set()
-        for dev_name in (self.positive_outport + self.negative_outport):
+        # 注意：这里重新获取一次输出管集合，逻辑上是正确的
+        all_out_devices = out_pos | out_neg
+        
+        for dev_name in all_out_devices:
             device = self.circuit.devices_dict.get(dev_name)
             if device:
                 g_net = device.terminals.get("G")
                 if g_net:
                     out_gate_nets.add(g_net)
 
-        # 3b. 【优化】利用 net_device_map 找出连接到这些网络的所有器件
+        # 4b. 找出连接到这些栅极网络的所有器件
         devices_on_out_g_nets: Set[str] = set()
         if out_gate_nets:
             for net in out_gate_nets:
-                # 使用 .lower() 匹配 net_device_map 的键
                 devices_on_out_g_nets.update(self.net_device_map.get(net.lower(), []))
 
-        beam3_candidates: Set[tuple] = set()
+        beam4_candidates: Set[tuple] = set()
         if devices_on_out_g_nets:
-            # 3c. 找出剩余路径中，有哪些路径“包含”这些器件
+            # 4c. 找出剩余路径中，包含这些“栅极关联器件”的路径
             for path in remaining_paths:
-                path_device_set = set(path[::2])  # <--- (修改) 适配 [Dev, Net, Dev]
-                # 检查路径器件集合 与 目标器件集合 是否有交集
+                path_device_set = set(path[::2])
                 if not path_device_set.isdisjoint(devices_on_out_g_nets):
-                    beam3_candidates.add(path)
+                    beam4_candidates.add(path)
 
-        # 3d. 将这些候选路径按长度分组
-        grouped_by_length_beam3: DefaultDict[int, List[List[str]]] = defaultdict(list)
-        for path in beam3_candidates:
-            grouped_by_length_beam3[len(path[::2])].append(list(path))  # <--- (修改) 适配 [Dev, Net, Dev]
+        # 4d. 按长度分组
+        grouped_by_length_beam4: DefaultDict[int, List[List[str]]] = defaultdict(list)
+        for path in beam4_candidates:
+            grouped_by_length_beam4[len(path[::2])].append(list(path))
 
-        # 3e. 将每个长度组作为一个电流束登记
-        beam3_idx = 1
-        paths_to_remove_for_beam3: Set[tuple] = set()
-        for length, path_list in grouped_by_length_beam3.items():
-            if len(path_list) > 1:  # 真正成束
-                beams[f"beam_3_out_gate_len{length}_group{beam3_idx}"] = path_list
-                # 记录这些路径，以便稍后从 remaining_paths 中移除
-                paths_to_remove_for_beam3.update(tuple(p) for p in path_list)
-                beam3_idx += 1
-
-        remaining_paths -= paths_to_remove_for_beam3
-
-        # -----------------------------------------------------
-        # 规则 4: （剩余路径中）包含器件数量相等的、且有至少一个公共器件的电流路径
-        # 公共器件的定义为：在两条路径中的位置索引一定分别相等。
-        # -----------------------------------------------------
-        # 4a. 按长度对所有剩余路径进行分组
-        remaining_grouped_by_length: DefaultDict[int, List[tuple]] = defaultdict(list)
-        for path_tuple in remaining_paths:
-            remaining_grouped_by_length[len(path_tuple[::2])].append(path_tuple)  # <--- (修改) 适配 [Dev, Net, Dev]
-
+        # 4e. 登记为束
         beam4_idx = 1
         paths_to_remove_for_beam4: Set[tuple] = set()
+        for length, path_list in grouped_by_length_beam4.items():
+            if len(path_list) > 1:
+                beams[f"beam_4_out_gate_len{length}_group{beam4_idx}"] = path_list
+                paths_to_remove_for_beam4.update(tuple(p) for p in path_list)
+                beam4_idx += 1
+
+        remaining_paths -= paths_to_remove_for_beam4
+
+        # =====================================================
+        # 规则 5: 公共器件索引匹配 (逻辑保持不变)
+        # =====================================================
+        # 5a. 按长度分组
+        remaining_grouped_by_length: DefaultDict[int, List[tuple]] = defaultdict(list)
+        for path_tuple in remaining_paths:
+            remaining_grouped_by_length[len(path_tuple[::2])].append(path_tuple)
+
+        beam5_idx = 1
+        paths_to_remove_for_beam5: Set[tuple] = set()
 
         for length, paths in remaining_grouped_by_length.items():
-            if len(paths) <= 1:  # 至少需要2条路径才能形成“束”
+            if len(paths) <= 1:
                 continue
 
-            # 使用并查集（Disjoint Set Union）来查找连通分量
-            # “连通”定义为：共享至少一个“同索引”的器件
-            parent = list(range(len(paths)))  # DSU 数组
+            # 并查集初始化
+            parent = list(range(len(paths)))
 
             def find_set(i):
                 if parent[i] == i:
@@ -2469,85 +2476,78 @@ class CircuitAnalyzer:
                 if root_i != root_j:
                     parent[root_i] = root_j
 
-            # 4b. 遍历所有路径对，如果它们共享“同索引”器件，则合并
+            # 5b. 比较路径对
             for i in range(len(paths)):
                 for j in range(i + 1, len(paths)):
-
-                    path_i_devs = paths[i][::2]  # <--- (修改) 适配 [Dev, Net, Dev]
-                    path_j_devs = paths[j][::2]  # <--- (修改) 适配 [Dev, Net, Dev]
+                    path_i_devs = paths[i][::2]
+                    path_j_devs = paths[j][::2]
 
                     has_common_indexed_device = False
                     for k in range(length):
+                        # 严格比较同一索引位置的器件名称
                         if path_i_devs[k] == path_j_devs[k]:
                             has_common_indexed_device = True
-                            break  # 找到一个即可
+                            break
 
                     if has_common_indexed_device:
                         unite_sets(i, j)
 
-            # 4c. 根据并查集的结果构建最终的束
+            # 5c. 构建最终组
             final_groups: DefaultDict[int, List[List[str]]] = defaultdict(list)
             for i in range(len(paths)):
                 root = find_set(i)
-                final_groups[root].append(list(paths[i]))  # 转换回list
+                final_groups[root].append(list(paths[i]))
 
-            # 4d. 登记为beam 4
+            # 5d. 登记
             for group_paths in final_groups.values():
-                if len(group_paths) > 1:  # 确保束中至少有2条路径
-                    beams[f"beam_4_common_dev_len{length}_group{beam4_idx}"] = group_paths
-                    paths_to_remove_for_beam4.update(tuple(p) for p in group_paths)
-                    beam4_idx += 1
+                if len(group_paths) > 1:
+                    beams[f"beam_5_common_dev_len{length}_group{beam5_idx}"] = group_paths
+                    paths_to_remove_for_beam5.update(tuple(p) for p in group_paths)
+                    beam5_idx += 1
 
-        remaining_paths -= paths_to_remove_for_beam4
+        remaining_paths -= paths_to_remove_for_beam5
 
-        # -----------------------------------------------------
-        # 登记所有剩余的、未成束的路径
-        # -----------------------------------------------------
-        # if remaining_paths:
-        #     beams["beam_other_unclassified"] = [list(p) for p in remaining_paths]
-
-        # --- (修改) 提取内部网络 ---
-        # 步骤 5: 提取所有束的内部网络
+        # =====================================================
+        # 后处理：提取内部网络、生成索引路径、打标签
+        # =====================================================
+        # 1. 提取所有束的内部网络
         for beam_id, paths_list in beams.items():
             for path in paths_list:
-                nets_in_path = path[1::2]  # 获取所有奇数索引的元素 (网络)
+                # 提取 path 中的 Net (奇数索引)
+                nets_in_path = path[1::2]
                 self.circuit.beam_net_sets[beam_id].update(nets_in_path)
 
-        # 步骤 6: 生成电流束路径 (List[Set[str]]) 并存储
-        # -----------------------------------------------------
+        # 2. 生成电流束路径 (List[Set[str]]) 并存储
         beam_paths_result: Dict[str, List[Set[str]]] = {}
         for beam_id, paths_list in beams.items():
-            # if beam_id == "beam_other_unclassified":
-            #     continue
             if not paths_list:
-                continue  # 跳过空的电流束
+                continue
 
-            # 1. 查找该束中的最大路径长度 (这段代码完全没必要，同一束长度一定相等)
+            # 获取最大长度 (同一束通常长度一致)
             max_len = 0
             for p in paths_list:
-                path_devs = p[::2]  # <--- (修改) 适配 [Dev, Net, Dev]
+                path_devs = p[::2]
                 if len(path_devs) > max_len:
                     max_len = len(path_devs)
 
-            # 2. 按索引生成集合列表，并标记器件
+            # 按索引生成器件集合
             current_beam_path: List[Set[str]] = []
             for i in range(max_len):
                 index_set: Set[str] = set()
                 for path in paths_list:
-                    path_devs = path[::2]  # <--- (修改) 适配 [Dev, Net, Dev]
-                    # 确保路径足够长，可以访问此索引
+                    path_devs = path[::2]
                     if i < len(path_devs):
                         dev_name = path_devs[i]
                         index_set.add(dev_name)
-                        # --- 嵌入标签 ---
-                        device = self.circuit.devices_dict.get(dev_name)
-                        if device:
-                            self.add_tag(device, self.DeviceTags.IN_CURRENT_BEAM)
+                        
+                        # [Refactor] 使用标准接口打标签
+                        self.add_tag(dev_name, self.DeviceTags.IN_CURRENT_BEAM)
+                
                 current_beam_path.append(index_set)
 
             beam_paths_result[beam_id] = current_beam_path
 
-        # 3. 将最终结果存储在类属性中
+        # 3. 存储结果
         self.circuit.current_beam_paths = beam_paths_result
         self.circuit.current_beams = beams
 
@@ -2813,7 +2813,8 @@ class CircuitAnalyzer:
                         b_is_common = dev_b_name in self.common_outer
 
                         if a_is_common != b_is_common: # XOR
-                            self.add_group("共模检测A", member_names_list) # 这里原代码叫 common_detect2
+                            self.add_tag(dev_a, self.DeviceTags.COMMON_2MOS)
+                            self.add_tag(dev_b, self.DeviceTags.COMMON_2MOS)
 
                             target_dev = dev_b if a_is_common else dev_a
                             self.add_tag(target_dev, self.DeviceTags.COMMON_INNER)
@@ -2986,14 +2987,14 @@ class CircuitAnalyzer:
     def _get_tail_current(self):
         """
         识别电路中的尾电流源：
-        1. 输入回路 (beam_1_differential): 长度为1的元素 -> input_tail
+        1. 输入回路 (beam_2_differential): 长度为1的元素 -> input_tail
         2. 公共部分 (Overlap): 检测 beam_1 和 beam_2 的重合元素，提取共栅对 -> common_tail
-        3. 输出回路 (beam_2_output): 剔除重合元素后，根据典型负载和低压镜像对标签提取 -> output_tail
+        3. 输出回路 (beam_3_output): 剔除重合元素后，根据典型负载和低压镜像对标签提取 -> output_tail
         使用 add_group 替代 input_tail/common_tail/output_tail 列表。
         """
         # 获取路径数据，若不存在则返回
-        path1 = self.circuit.current_beam_paths.get("beam_1_differential")
-        path2 = self.circuit.current_beam_paths.get("beam_2_output")
+        path1 = self.circuit.current_beam_paths.get("beam_2_differential")
+        path2 = self.circuit.current_beam_paths.get("beam_3_output")
 
         if not path1:
             return
@@ -3117,12 +3118,12 @@ class CircuitAnalyzer:
     def _get_output_pair(self):
         """
         识别输出对 (Output Pair)。
-        定义：对于一个输出端对，如果这两个管子的栅极网络在第一个电流束 (beam_1_differential)
+        定义：对于一个输出端对，如果这两个管子的栅极网络在第一个电流束 (beam_2_differential)
         的电流束网络集合中，则它们构成输出对。
         """
         # 1. 获取第一个电流束的网络集合
         # 对应 "beam_net_sets中第一个键的值"
-        beam1_nets = self.circuit.beam_net_sets.get("beam_1_differential")
+        beam1_nets = self.circuit.beam_net_sets.get("beam_2_differential")
 
         if not beam1_nets:
             return
