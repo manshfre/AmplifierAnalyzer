@@ -426,9 +426,9 @@ class CircuitAnalyzer:
         3. 关联性：任何增删操作都会触发关联检查提示，确保逻辑闭环。
 
         此类定义了从网表解析到分析全过程的数据格式契约，包含三个不可变键的字典：
-        1. ALIAS_CONFIG: 定义分析器对器件类型的引用格式，验证devices_information[1]）
-        2. PORT_CONFIG: 定义分析器对器件端口的引用格式，验证devices_information[2]的键）
-        3. PARAM_CONFIG: 定义分析器对器件参数的引用格式，验证devices_information[3]的键）
+        1. ALIAS_CONFIG: 定义各种器件类型在分析器中的别名，验证devices_information[1]）
+        2. PORT_CONFIG: 定义各种器件类型在分析器中的端口名称，验证devices_information[2]的键）
+        3. PARAM_CONFIG: 定义各种器件类型所具有的参数类型，验证devices_information[3]的键）
         
         键的约束：
         - NMOS与PMOS的PORT_CONFIG必须相等
@@ -636,6 +636,9 @@ class CircuitAnalyzer:
         self.config_complete: bool = False
 
         self.copy_tube_r_raw_map: Dict[str, Tuple[str, float]] = {}  # 存储 (ref_dev_name, r_raw)
+
+        # 子结构类型注册表
+        self.substructure_types: Dict[str, 'CircuitAnalyzer.SubStructureType'] = {}
         # -------------------------------------缓存初始化---------------------------------------
         self.diff_pair_negative: List[str] = []  # 临时存储差分管
         self.diff_pair_positive: List[str] = []
@@ -685,17 +688,14 @@ class CircuitAnalyzer:
         # 替代原有的 self.outport_pair, self.typ_load, self.common_tail 等
         # 结构: { "group_type": [ ["M1", "M2"], ["M3", "M4"] ] }
         self.device_groups: DefaultDict[str, List[List[str]]] = defaultdict(list)
-        
-        # 子结构类型注册表
-        self.substructure_types: Dict[str, 'CircuitAnalyzer.SubStructureType'] = {}
 
         self.top_nodes: List['CircuitAnalyzer.Device'] = []  # 顶层节点器件列表，指电路中连接在电源正端的器件，是电路中电流路径的起点
-        # 这里的一些缓存要考虑是否需要删除，缓存的名称要更规范一些，最好自动生成
-        self._flat_beam_cache: Optional[List[Set[str]]] = None  # 用于缓存压平的电流束路径，每个元素是一条电流束路径所包含的所有器件
+        # 这些缓存将在未来考虑如何处理
+        self._flat_beam_cache: Optional[List[Set[str]]] = None  # 用于缓存压平的电流束路径，每个元素是一条电流束路径所包含的所有器件，用于对称电容识别
         self.constraint_groups: List[List[str]] = []        #电路的参数组合，偏多，因为没考虑主电路电流匹配
-        self.calibrate_params: Dict[str,Dict[str,str]] = {}     #更新后的device_params字典（初始解）
 
-        self.device_params: Dict[str, Dict[str, str]] = {} # 原始参数
+        self.calibrate_params: Dict[str,Dict[str,str]] = {}     #更新后的电路参数配置，需要重构
+        self.device_params: Dict[str, Dict[str, str]] = {} # 原始参数，需要被重构
 
         self.input_tail: List[str] = []     #输入支路尾电流源
         self.output_tail: List[List[str]] = []    #输出支路电流源对
@@ -920,7 +920,7 @@ class CircuitAnalyzer:
         执行分析流程
         
         根据config_complete标志决定是否执行参数校准
-        这里要跟据参数依赖关系进行调整
+        这里的流程要确保正确
         """
         # -----------------------------------------子结构注册-----------------------------------------------
         self._register_substructure_types()
@@ -964,16 +964,16 @@ class CircuitAnalyzer:
 
         # 5. 登记对称电容
         self._register_sym_capacitors()
-        
-        # 条件执行参数调整
+
+        #----------------------------------------生成参数约束---------------------------------------------------
+        self._generate_constraint_groups()
+        # ---------------------------------------条件执行参数校准-----------------------------------------------
         if self.config_complete:
             print("[阶段5] 生成约束并校准参数...")
             self._precompute_r_raw_map()
-            self._generate_constraint_groups()
             self._calibrate_device_params()
         else:
             print("[警告] 参数配置不完整，跳过参数校准")
-            self.constraint_groups = []
             self.calibrate_params = copy.deepcopy(self.device_params)
 
     # -------------------------------------------------------------------------------------------------------------------------------------------
@@ -989,7 +989,7 @@ class CircuitAnalyzer:
         return net_name.lower() in target_lower
 
     # ------------对称电容识别辅助函数-----------
-    def _is_net_power(self, net: str) -> bool:
+    def _is_net_powerorgnd(self, net: str) -> bool:
         """检查网络是否连接到正电源或负电源"""
         return self._net_matches(net,self.CircuitPorts.POWER_POSITIVE) or self._net_matches(net,self.CircuitPorts.POWER_NEGATIVE)
 
@@ -1124,6 +1124,7 @@ class CircuitAnalyzer:
     def _register_substructure_types(self):
         """
         注册子结构类型及约束规则
+        
         这里之后要进行大规模重构
         """
         def pair_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
@@ -1143,6 +1144,8 @@ class CircuitAnalyzer:
         def low_voltage_mirror_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
             """
                 所有管子的约束向下层参考管看齐，没考虑电阻
+                上层参考管的参数设置为与下层参考管完全相同
+                偏置镜像管的参数与下层参考管完全相同
             """
             try:
                 # 1. 查找关键器件
@@ -1219,8 +1222,8 @@ class CircuitAnalyzer:
             普通电流镜约束:
             - l 始终约束
             - Bias mirrors (有BIAS标签):
-                - If Ref is ROOT_REF: fw 相互约束, 但独立于 Ref
-                - If Ref is not ROOT_REF: fw 约束为等于 Ref.fw
+                - If Ref is ROOT_REF: fw/m 相互约束, 但独立于 Ref（偏置管的电流复制比例相等）
+                - If Ref is not ROOT_REF: fw/m 约束为等于 Ref.fw/m（偏置管不可复制电流，即认为偏置电路中除电流源路径外所有电流路径电流相等）
             """
             try:
                 ref = [d for d in members if self.DeviceTags.CURRENT_MIRROR_REF in d.tags][0]
@@ -1260,7 +1263,7 @@ class CircuitAnalyzer:
             return constraints
 
         def common_detect4_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """4管共模检测约束：
+            """4管共模检测约束：4个管子的所有参数完全相等
             fw/l/m需相同
             """
             base_constraints = [  # 正常约束
@@ -1320,7 +1323,10 @@ class CircuitAnalyzer:
             return _rc_constraint_helper(members)
 
         def sym_capacitor_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """对称电容约束 (l同)"""
+            """
+            对称电容约束：参数完全相等 
+            (l同)
+            """
             constraints = []
             capacitors = [d for d in members if d.type == "Capacitor"]
 
@@ -1446,6 +1452,14 @@ class CircuitAnalyzer:
 
     # -------------------------------------------------------特殊器件检测------------------------------------------------------------
     def _mark_obvious_tags(self):
+        """
+        G/D连接导线相同的管子标记为二极管MOS
+        S连到电源正端的PMOS、D连到电源正端的NMOS、一端连接到电源正端的电阻存储为顶层节点（不考虑电容、电感等）
+        连接到差分输入端的管子标记为差分输入管
+        连接到共模检测端的管子标记为外侧共模管
+
+        **独立，不依赖其他函数**
+        """
         for device in self.circuit.devices_dict.values():
             # ---------------------检测并缓存二极管连接MOS管------------------
             if device.type in ["PMOS", "NMOS"]:
@@ -1476,10 +1490,17 @@ class CircuitAnalyzer:
     # ------------------------------------------------ 标记输出管/频率补偿/RC共模检测 --------------------------------------------------------
     def _mark_outport_devices(self):
         """
-        使用 net_device_map 快速标记输出管 (MOS)，
-        根据预定义逻辑检测连接到输出端的 RC 结构，应用时应检查预定义逻辑是否匹配电路设计。
+        注意：根据预定义逻辑检测连接到输出端的 RC 结构，应用时应检查预定义逻辑是否匹配电路设计。
+
+        MOS:D/S连接到输出端的MOS管标记为输出端管
+        电容：输出端-电容-MOS栅：共模检测；输出端-电容-（单个纯电阻）-MOS S/D：频率补偿；输出端-电容-（单个纯电阻）-MOS栅与MOS S/D：频率补偿
+        电阻：输出端-电阻-（单个纯电阻）-MOS栅：共模检测
+
+        这里有很多冗余判断逻辑，需要优化
+
+        **独立，不依赖其他函数**
         """
-        # --- 辅助函数 1: 获取二端器件的另一端网络(在电流路径中存在重合函数，可以优化) ---
+        # --- 辅助函数 1: 获取二端器件的另一端网络 ---
         def _get_other_terminal_net(device: 'CircuitAnalyzer.Device', connected_net: str) -> Optional[str]:
             """获取电容/电阻的另一端网络名"""
             net1 = device.terminals.get("PLUS")
@@ -1493,7 +1514,7 @@ class CircuitAnalyzer:
                 return net1
             return None
 
-        # --- 辅助函数 2: 获取网络上的MOS连接 (宽松匹配) ---
+        # --- 辅助函数 2: 获取网络上的MOS管与对应连接方式---
         def _get_net_mos_connections(net: str, exclude_devices: Set[str]) -> List[Dict]:
             """
             获取指定网络上所有MOS管的连接信息。
@@ -1606,16 +1627,16 @@ class CircuitAnalyzer:
                             num_mos_far = len(mos_conns_far)
 
                             if num_mos_far > 1:
-                                # Case C3.1 (C->R->多MOS): 标记并缓存 COMPENSATE
+                                # Case C3.1 (C->R->MOS栅极与MOS两端): 标记并缓存 COMPENSATE
                                 self.add_tag(cap_device, self.DeviceTags.COMPENSATE)
                                 self.add_tag(serial_res, self.DeviceTags.COMPENSATE)
 
                             elif num_mos_far == 1:
                                 if mos_conns_far[0]['conn_type'] == 'G':
-                                    # Case C3.2.1 (C->R->单MOS 栅极): 跳过
+                                    # Case C3.2.1 (C->R->MOS 栅极): 跳过
                                     pass
                                 else:
-                                    # Case C3.2.2 (C->R->单MOS S/D): 标记并缓存 COMPENSATE
+                                    # Case C3.2.2 (C->R->MOS S/D): 标记并缓存 COMPENSATE
                                     self.add_tag(cap_device, self.DeviceTags.COMPENSATE)
                                     self.add_tag(serial_res, self.DeviceTags.COMPENSATE)
                         # else:
@@ -1684,7 +1705,12 @@ class CircuitAnalyzer:
     ##################################################################################################################
     def _mark_common_mode_detect_b(self):
         """
-        如果识别到2个外侧共模管，则查找其共源极连接的另外2个内侧共模管。
+        如果识别到2个外侧共模管，则查找其共源极连接的另外2个内侧共模管，并一并打上4管共模检测标签
+
+        注意：假设存在2个外侧共模管时，必然有2个共源级连接内侧共模管，否则不打共模内侧管标签与4管共模检测标签
+
+        **依赖外侧共模管标签**
+        _mark_obvious_tags() 之后调用
         """
         if len(self.common_outer) != 2:
             return
@@ -1731,6 +1757,11 @@ class CircuitAnalyzer:
     ##########################################级联与普通电流镜标记#########################################################
     ##################################################################################################################
     def _analyze_diode_mos_structures(self):
+        """
+        **依赖二极管连接标签**
+        _mark_obvious_tags() 之后调用
+        """
+
         groups = self._find_slave_mos_and_form_groups()
         for group in groups:
             self._mark_cascode_roles(group)
@@ -1813,7 +1844,13 @@ class CircuitAnalyzer:
     def _mark_root_reference_path(self):
         """
         根据电流源端口(如IREF/IIN)查找“电流源路径”。
-        并为该路径上所有器件(必须是二极管连接的电流镜参考管)打上ROOT_REF标签。
+        并为该路径上所有普通电流镜参考管打上ROOT_REF标签。
+
+        注意：假设电流源路径为电流源端口-普通电流镜参考管-（普通电流镜参考管）-电源负端；假设电流源端口到电源负端间只有一条电流路径，且此路径上只包含普通电流镜参考管
+
+        这里存在逻辑冗余
+        **依赖普通电流镜参考管标签**
+        _analyze_diode_mos_structures() 之后
         """
         # 1. 查找起始网络
         start_net = None
@@ -1833,7 +1870,7 @@ class CircuitAnalyzer:
             # return  # 未找到起始网络，正常退出
 
         # 2. 查找起始器件
-        # 路径的起始点必须是唯一的二极管连接的参考管
+        # 路径的起始点必须是唯一的二极管连接的参考管（不然会把镜像管也错误标记成根参考管）
         start_candidates = []
         for dev_name in start_net_device_names:
             dev = self.circuit.devices_dict.get(dev_name)
@@ -1896,7 +1933,16 @@ class CircuitAnalyzer:
     #################################################低压电流镜标记######################################################
     ##################################################################################################################
     def _detect_low_voltage_current_mirrors(self):
-        """检测低压电流镜"""
+        """
+        A的D连B的G，A的S连B的D：A为上层参考管，B为下层参考管
+        A的G连B的D，A的D连B的S：B为上层参考管，A为下层参考管
+        以下层参考管为中心，构建对上层参考管、上层偏置管、上层镜像管、下层镜像管的关系，组成低压电流镜
+
+        注意：假设偏置管最多只有一个；不考虑电阻、电容等其他器件；基于普通电流镜识别偏置管，随后删除耦合的普通电流镜标签与缓存
+        **依赖二极管标签、普通电流镜镜像管标签**
+        _mark_obvious_tags() 之后
+        _analyze_diode_mos_structures之后
+        """
         mos_devices = [d for d in self.circuit.devices_dict.values() if d.type in ["PMOS", "NMOS"]]
         processed_mos = set()
 
@@ -1965,7 +2011,9 @@ class CircuitAnalyzer:
     ##################################################################################################################
     def _mark_low_voltage_mirrors(self, upper_ref: 'CircuitAnalyzer.Device', lower_ref: 'CircuitAnalyzer.Device',
                                   gate_net_map):
-        """标记低压电流镜的镜像管"""
+        """
+        标记低压电流镜的镜像管
+        """
         upper_ref_g = upper_ref.terminals["G"]
         lower_ref_g = lower_ref.terminals["G"]
 
@@ -1979,7 +2027,7 @@ class CircuitAnalyzer:
             diode_mos_list = [d for d in devices_on_gate if self.DeviceTags.DIODE_MOS in d.tags]  #
 
             if diode_mos_list:
-                upper_bias = diode_mos_list[0]
+                upper_bias = diode_mos_list[0]  # 假设只有一个偏置管
                 self.add_tag(upper_bias, self.DeviceTags.LV_MIRROR_UPPER_BIAS)  # 赋予偏置标签 #
             else:
                 # 严重错误：上层参考管应该有偏置管，但没找到
@@ -2012,8 +2060,6 @@ class CircuitAnalyzer:
             # --- 净化逻辑 (Purge Logic) ---
             if upper_bias:
                 # 检查该偏置管是否有“普通电流镜”关系
-                # 旧代码: if upper_bias.name in self.current_cache
-                # 新代码: 检查 relation_graph 中是否有 mirror 记录
                 existing_mirrors = self.get_relations(upper_bias.name, "current_mirror_mirror")
                 
                 if existing_mirrors:
@@ -2050,10 +2096,14 @@ class CircuitAnalyzer:
     # -----------------------------------------------------电流路径生成-----------------------------------------------------------
     def generate_current_paths(self):
         """
-        从 self.top_nodes 出发，生成从电源到地的所有电流路径。
-        规则修正：
-        严格禁止 NMOS -> PMOS 的逆向连接。
-        两个MOS管之间最多只能有2个电阻，否则无法识别
+        电流路径形式：
+        1.电源正端-NMOS/电阻-(NMOS/电阻)……-电源负端
+        2.电源正端-PMOS/电阻-(PMOS/电阻)……-(NMOS/电阻)……-电源负端
+        
+        注意：仅包含MOS管和电阻；严格禁止 NMOS -> PMOS 的逆向连接；两个MOS管之间最多只能有2个电阻，否则无法识别成电流路径
+
+        **依赖识别出的顶层节点**
+        _mark_obvious_tags() 之后
         """
         all_paths: List[List[str]] = []
 
@@ -2112,7 +2162,7 @@ class CircuitAnalyzer:
     def _find_valid_next_devices(self, net_name: str, parent_dev: 'CircuitAnalyzer.Device') -> List['CircuitAnalyzer.Device']:
         """
         在 net_name 上寻找下一级器件。
-        规则修正：
+        规则：
         1. 排除自己。
         2. NMOS -> PMOS 是非法路径 (禁止)。
         3. NMOS -> NMOS(D) 合法。
@@ -2161,11 +2211,11 @@ class CircuitAnalyzer:
         return candidates
 
     # ------------------------------
-    # 辅助方法：电阻连接规则校验 (逻辑确认)
+    # 辅助方法：电阻连接规则校验（防止NMOS后接PMOS）
     # ------------------------------
     def _check_resistor_validity(self, resistor: 'CircuitAnalyzer.Device', input_net: str, parent_type: str) -> bool:
         """
-        检查电阻的有效性。
+        检查电阻的有效性（实质是检查NMOS/PMOS连接合法性）。
         逻辑：Parent -> Resistor(input) -> Resistor(target) -> Target Devices
         
         校验规则：
@@ -2219,7 +2269,7 @@ class CircuitAnalyzer:
         return has_valid_connection
 
     # ------------------------------
-    # 辅助方法：获取器件流出网络 (保持不变)
+    # 辅助方法：获取器件流出网络
     # ------------------------------
     def _get_device_output_net(self, device: 'CircuitAnalyzer.Device', incoming_net: str = None) -> Optional[str]:
         if device.type == "NMOS":
@@ -2240,7 +2290,7 @@ class CircuitAnalyzer:
         return None
 
     # ------------------------------
-    # 辅助方法：电源检测 (简化复用)
+    # 辅助方法：电源检测
     # ------------------------------
     def _is_net_power(self, net_name: str) -> bool:
         return self._net_matches(net_name, self.CircuitPorts.POWER_POSITIVE)
@@ -2248,19 +2298,25 @@ class CircuitAnalyzer:
     def _is_net_ground(self, net_name: str) -> bool:
         return self._net_matches(net_name, self.CircuitPorts.POWER_NEGATIVE)
 
-    # -----------------------------------------------------电流束生成、电流束路径生成、电流束管标记-----------------------------------------------------------
+    # --------------------------------------------------电流束生成、电流束路径生成、电流束网络生成、电流束管标记---------------------------------------------------
     def analyze_current_beams(self):
         """
-        根据定义的规则获取电流束。
-        必须在 generate_current_paths() 之后调用。
-        使用 [Dev, Net, Dev] 格式，并提取内部网络集合。
+        根据定义的规则获取电流束。使用 [Dev, Net, Dev] 格式，并提取电流束内部网络集合与电流束内部按位置索引的器件集合
+        注意：默认偏置电路不会形成电流束
         
-        优先级顺序：
-        1. 4管共模检测 (CMFB)
-        2. 差分输入对
-        3. 输出管
-        4. 输出管栅极关联
-        5. 公共器件索引匹配
+        电流束获取规则优先级顺序：
+        1. 包含4管共模检测 (CMFB)的电流路径为一类电流束
+        2. 除掉共模检测，包含差分输入对的电流路径为一类电流束
+        3. 除掉共模检测与输入，包含输出端管的电流路径为一类电流束
+        4. 除掉共模检测、输入、输出端管，包含输出管栅极网络的长度相等的电流路径为一类电流束
+        5. 除掉以上4个，包含公共器件的长度相等的电流路径为一类电流束
+        6. 剩余路径不归类。
+
+        **依赖4管共模检测标签、差分输入标签、输出端管标签、电流路径生成**
+        _mark_obvious_tags()之后
+        _mark_outport_devices()之后
+        _mark_common_mode_detect_b() 之后
+        generate_current_paths() 之后
         """
         # 0. 确保电流路径已生成
         if not self.circuit.current_paths:
@@ -2289,7 +2345,7 @@ class CircuitAnalyzer:
             remaining_paths -= beam1_paths
 
         # =====================================================
-        # 规则 2: 差分输入对 (原规则 1)
+        # 规则 2: 差分输入对
         # =====================================================
         diff_pos = self.get_names_by_tag(self.DeviceTags.DIFF_POSITIVE)
         diff_neg = self.get_names_by_tag(self.DeviceTags.DIFF_NEGATIVE)
@@ -2307,7 +2363,7 @@ class CircuitAnalyzer:
             remaining_paths -= beam2_paths
 
         # =====================================================
-        # 规则 3: 输出管 (原规则 2)
+        # 规则 3: 输出端管
         # =====================================================
         out_pos = self.get_names_by_tag(self.DeviceTags.OUTPORT_POSITIVE)
         out_neg = self.get_names_by_tag(self.DeviceTags.OUTPORT_NEGATIVE)
@@ -2325,7 +2381,7 @@ class CircuitAnalyzer:
             remaining_paths -= beam3_paths
 
         # =====================================================
-        # 规则 4: 输出管栅极关联路径 (逻辑保持不变)
+        # 规则 4: 输出管栅极关联路径 
         # =====================================================
         # 4a. 找出所有输出管的栅极网络
         out_gate_nets: Set[str] = set()
@@ -2339,7 +2395,7 @@ class CircuitAnalyzer:
                 if g_net:
                     out_gate_nets.add(g_net)
 
-        # 4b. 找出连接到这些栅极网络的所有器件
+        # 4b. 找出连接到这些栅极网络的所有器件，没有排除自身，因为电流路径不会连接到栅极
         devices_on_out_g_nets: Set[str] = set()
         if out_gate_nets:
             for net in out_gate_nets:
@@ -2370,7 +2426,7 @@ class CircuitAnalyzer:
         remaining_paths -= paths_to_remove_for_beam4
 
         # =====================================================
-        # 规则 5: 公共器件索引匹配 (逻辑保持不变)
+        # 规则 5: 公共器件索引匹配
         # =====================================================
         # 5a. 按长度分组
         remaining_grouped_by_length: DefaultDict[int, List[tuple]] = defaultdict(list)
@@ -2433,7 +2489,7 @@ class CircuitAnalyzer:
         # =====================================================
         # 后处理：提取内部网络、生成索引路径、打标签
         # =====================================================
-        # 1. 提取所有束的内部网络
+        # 1. 提取所有束的内部导线网络
         for beam_id, paths_list in beams.items():
             for path in paths_list:
                 # 提取 path 中的 Net (奇数索引)
@@ -2477,11 +2533,14 @@ class CircuitAnalyzer:
     ##############################################偏置管标记################################################################
     def _mark_bias_mirrors(self):
         """
-        重构版本：
-        1. 遍历 TagIndex 获取参考管。
-        2. 通过 RelationGraph 获取镜像管。
-        3. 根据是否在电流束中打 BIAS 标签。
-        4. 替代 root_bias_mirror 字典为 relation 存储。
+        默认参考管在主电路中时，不会有镜像管处在偏置电路中；默认偏置电路不会形成电流束
+        普通电流镜：参考管在偏置电路，所有不在电流束中的镜像管标记为 BIAS。参考管在主电路，跳过。
+        低压电流镜：下层参考管在偏置电路，所有不在电流束中的镜像管标记为 BIAS。下层参考管在主电路，跳过。
+
+        **要在标记根参考管、识别低压电流镜、分析电流束后调用**
+        _mark_root_reference_path之后
+        _detect_low_voltage_current_mirrors之后
+        analyze_current_beams之后
         """
         # --- 1. 处理普通电流镜 ---
         # 获取所有普通电流镜参考管
@@ -2534,10 +2593,15 @@ class CircuitAnalyzer:
     # 函数识别顺序需要优化以提高代码效率
     def _register_beam_substructures(self):
         """
-        按顺序遍历电流束路径中的 *所有器件对*（避免错误），登记：
-        1. 特殊或G-连接的器件对 (Diff, Out, Loads, Common) 并更新类属性
-        2. 非G-连接的跨束负载 (LOAD_C)，基于 *内部网络* 检查
-        3.优先登记 4-器件 结构 (CMFB, Quad Load)(后续可优化识别顺序)
+        对于所有电流束，按顺序遍历电流束路径元素（器件列表）
+        元素长度为4：1.处理4管共模检测，依据4管共模检测标签；2.处理典型负载，依赖4管共栅
+        元素长度非4（2,4）：1.处理差分输入，依据差分输入标签；2.处理输出端管，依据输出端管标签；
+        3.处理A型负载，依据二极管标签与普通电流镜标签；4.处理B型负载，依据二极管标签；5.处理典型负载，依据普通电流镜标签
+        6.处理2管共模检测情况，找到内侧共模管并打上2管共模检测标签；7.处理栅极处在至少一个电流束内部网络集合中的器件对，登记为跨束栅极连接结构
+
+        注意：1.先单独处理4管共模检测与4管共栅是为了避免错误，这两部分顺序可换。4管共模检测实际可以在打标签时登记；2.差分输入、输出端实际上可以在之前打标签的时候进行登记；
+        3.元素长度非4实际是指长度为2或4，4在现有逻辑中特指7与5的结合（即典型负载与跨束连接结构），因为现有的逻辑只能处理这两种长度；
+        4.A型负载、B型负载、2管共模检测、跨束连接的顺序可换，典型负载顺序在A型负载之后。但在典型负载逻辑中加入二极管标签逻辑，即可与A型负载的识别解耦合
         """
         def _register_helper(members: List['CircuitAnalyzer.Device'], sub_type: str,
                              sub_id_prefix: str):  #
@@ -2561,7 +2625,7 @@ class CircuitAnalyzer:
         def _check_cross_beam_symmetry(mos_a: 'CircuitAnalyzer.Device',
                                        mos_b: 'CircuitAnalyzer.Device') -> bool:  #
             """
-                (新逻辑) 检查两个MOS管的栅极网络是否在同一个电流束的 *内部网络* 集合中。
+                检查两个MOS管的栅极网络是否至少在某一个电流束的 *内部网络* 集合中。
             """
             g_net_a = mos_a.terminals.get("G")
             g_net_b = mos_b.terminals.get("G")
@@ -2763,9 +2827,12 @@ class CircuitAnalyzer:
     # ---------------------------------------------登记低压电流镜中的对称镜像对---------------------------------------------------
     def _register_lv_mirror_pairs(self):
         """
-        遍历所有电流束中的 *实际路径*，查找是否存在
-        非偏置的上层镜像管和下层镜像管在路径中连续出现的情况。
-        如果存在，则将它们登记为 "低压镜像对"。
+        遍历所有电流束中的 *实际路径*，查找是否存在上层镜像管和下层镜像管在路径中连续出现的情况。
+        如果存在，则将它们登记为 "低压镜像对"。（假设偏置电路中没有电流束）
+
+        **要在识别低压电流镜后、分析电流束后调用**
+        _detect_low_voltage_current_mirrors 之后 
+        analyze_current_beams 之后
         """
         processed_pairs = set()  # 避免同一对被重复登记
 
@@ -2795,11 +2862,11 @@ class CircuitAnalyzer:
                         continue  # 器件不存在
 
                     # --- 检查核心逻辑 ---
-                    # 1. 检查是否为非偏置管
-                    is_bias_a = self.DeviceTags.LV_MIRROR_BIAS_MIRROR in dev_a.tags
-                    is_bias_b = self.DeviceTags.LV_MIRROR_BIAS_MIRROR in dev_b.tags
-                    if is_bias_a or is_bias_b:
-                        continue  # 任意一个是偏置管，则跳过
+                    # 1. 检查是否为非偏置管（这里逻辑冗余，因为电流束中的器件一定没有偏置标签）
+                    # is_bias_a = self.DeviceTags.LV_MIRROR_BIAS_MIRROR in dev_a.tags
+                    # is_bias_b = self.DeviceTags.LV_MIRROR_BIAS_MIRROR in dev_b.tags
+                    # if is_bias_a or is_bias_b:
+                    #     continue  # 任意一个是偏置管，则跳过
 
                     # 2. 检查是否为 上/下 镜像对
                     is_upper_a = self.DeviceTags.LV_MIRROR_UPPER_MIRROR in dev_a.tags
@@ -2828,9 +2895,11 @@ class CircuitAnalyzer:
     # ---------------------------------------------登记低压电流镜 ---------------------------------------------------
     def _register_lv_mirrors(self):
         """
-        重构版本：
-        不再遍历 lv_current，而是以 LV_MIRROR_LOWER_REF 为锚点，
-        通过 RelationGraph 获取关联的上层参考、偏置和镜像管。
+        这里完全就是走个形式，实际成员都是从 RelationGraph 中获取的。
+        只要保证 RelationGraph 构建正确即可。
+        
+        **要在识别低压电流镜后调用**
+        _detect_low_voltage_current_mirrors 之后
         """
         # 1. 获取所有锚点 (下层参考管)
         lower_ref_names = self.get_names_by_tag(self.DeviceTags.LV_MIRROR_LOWER_REF)
@@ -2875,9 +2944,11 @@ class CircuitAnalyzer:
     # -----------------------------------------------登记普通电流镜 --------------------------------------------------
     def _register_current_mirrors(self):
         """
-        重构版本：
-        不再遍历 current_cache，而是以 CURRENT_MIRROR_REF 为锚点，
-        通过 RelationGraph 获取镜像管。
+        这里完全就是走个形式，实际成员都是从 RelationGraph 中获取的。
+        只要保证 RelationGraph 构建正确即可。
+        
+        **要在识别低压电流镜后调用**
+        _detect_low_voltage_current_mirrors之后
         """
         # 1. 获取所有参考管
         ref_names = self.get_names_by_tag(self.DeviceTags.CURRENT_MIRROR_REF)
@@ -2913,7 +2984,10 @@ class CircuitAnalyzer:
         1. 输入回路 (beam_2_differential): 长度为1的元素 -> input_tail
         2. 公共部分 (Overlap): 检测 beam_1 和 beam_2 的重合元素，提取共栅对 -> common_tail
         3. 输出回路 (beam_3_output): 剔除重合元素后，根据典型负载和低压镜像对标签提取 -> output_tail
-        使用 add_group 替代 input_tail/common_tail/output_tail 列表。
+
+        **要在分析电流束之后、识别典型负载与低压镜像对后调用**
+        _register_beam_substructures 之后
+        _register_lv_mirror_pairs 之后
         """
         # 获取路径数据，若不存在则返回
         path1 = self.circuit.current_beam_paths.get("beam_2_differential")
@@ -3043,6 +3117,9 @@ class CircuitAnalyzer:
         识别输出对 (Output Pair)。
         定义：对于一个输出端对，如果这两个管子的栅极网络在第一个电流束 (beam_2_differential)
         的电流束网络集合中，则它们构成输出对。
+
+        **要在登记电流束结构之后调用**
+        _register_beam_substructures 之后
         """
         # 1. 获取第一个电流束的网络集合
         # 对应 "beam_net_sets中第一个键的值"
@@ -3088,9 +3165,10 @@ class CircuitAnalyzer:
     # ------------------------------------------登记频率补偿和RC共模检测 ------------------------------------------------
     def _register_rc_structures(self):
         """
-        重构版本：
-        不再使用 self.compensate 等列表，直接查询 TagIndex。
-        将所有打上特定 Tag 的器件聚合为一个全局子结构 (保持原逻辑行为)。
+        将所有打上特定 Tag 的器件聚合为一个全局子结构，子结构内电容参数相等、电阻参数相等
+
+        **要在标记输出端器件后调用**
+        _mark_output_devices 之后
         """
         # 1. 登记 频率补偿
         # [Refactor] 直接查询拥有 COMPENSATE 标签的所有器件
@@ -3118,7 +3196,11 @@ class CircuitAnalyzer:
     # -------------------------------------------登记对称电容-------------------------------------------
     def _register_sym_capacitors(self):
         """
-            遍历所有未被分配的电容, 检查对称性。
+        遍历所有未被分配的电容, 检查对称性。
+        规则：电容信号端连接的MOS管处在至少一个同一个电流束中。
+
+        **要在标记输出端器件后调用**
+        _mark_outport_devices 之后
         """
         # 1. 收集候选电容
         caps_to_check = []
@@ -3149,8 +3231,8 @@ class CircuitAnalyzer:
                 c2_net1 = c2.terminals.get("PLUS")
                 c2_net2 = c2.terminals.get("MINUS")
 
-                c1_pwr = (self._is_net_power(c1_net1), self._is_net_power(c1_net2))
-                c2_pwr = (self._is_net_power(c2_net1), self._is_net_power(c2_net2))
+                c1_pwr = (self._is_net_powerorgnd(c1_net1), self._is_net_powerorgnd(c1_net2))
+                c2_pwr = (self._is_net_powerorgnd(c2_net1), self._is_net_powerorgnd(c2_net2))
 
                 set_mos_1: Set[str] = set()
                 set_mos_2: Set[str] = set()
@@ -3205,6 +3287,8 @@ class CircuitAnalyzer:
                                sub_id: str):  #
         """
         将一组器件登记为一个子结构实例。
+
+        这个函数要考虑是否需要存在以及如何修改
         """
         sub_def = self.circuit.substructure_types.get(sub_type)
         if not sub_def:
@@ -3382,6 +3466,10 @@ class CircuitAnalyzer:
     def _is_copy_tube(self, target_param_name: str, ref_param_name: str) -> bool:
         """
         辅助函数：检查一个 'l' 参数是否属于"复制管"。
+        普通电流镜：参考管是根参考管，所有镜像管都是复制管；参考管在偏置电路不是根参考管，所有非偏置镜像管是复制管；参考管在主电路，所有镜像管是复制管
+        低压电流镜：下层参考管在主电路，所有镜像管是复制管；下层参考管在偏置电路，所有非偏置镜像管是复制管
+
+        这里逻辑需要修改，例如l的存在完全没有必要
         """
         try:
             target_dev_name, key = target_param_name.rsplit("_", 1)
@@ -3478,6 +3566,8 @@ class CircuitAnalyzer:
         在任何校准发生前，遍历所有电流镜，计算并存储所有“复制管”
         相对于其参考管的 *原始* W/L 比例 (r_raw)。
         修正：LV 镜的上层和下层管必须使用各自的 W/L 参考。
+
+        这里存在逻辑冗余
         """
         print("\n" + "=" * 30 + " 预计算 r_raw 真值 " + "=" * 30)
         # 使用 self.device_params (原始CDF值)
@@ -3589,7 +3679,7 @@ class CircuitAnalyzer:
 
                 r_raw = copy_wl / target_ref_wl
 
-                # 存储：键仍然是 lower_ref_name (用于分组)，值是 (lower_ref_name, r_raw)
+                # 存储：键仍然是 lower_ref_name (因为之后上层参考管的参数会被设置为与下层参考管完全一样)，值是 (lower_ref_name, r_raw)
                 self.copy_tube_r_raw_map[copy_name] = (lower_ref_name, r_raw)
                 # 打印时显示 *实际* 使用的参考
                 print(f"  [LV] 记录 {copy_name} (实际参考: {target_ref_name}), r_raw = {r_raw:.4f}")
@@ -3626,6 +3716,7 @@ class CircuitAnalyzer:
 
             # --- 1. 黄金标准搜索 ---
             for tag in TAG_PRIORITY_ORDER:
+                # 这里直接break是因为之前通过图算法生成的约束组合已经把整个电路所有子结构都考虑了，即TAG_PRIORITY_ORDER内部4个标签无论顺序怎么变，结果应该是一样的，只是代码运行时间会有区别
                 if golden_ref_param: break
                 for param_name in group:
                     try:
@@ -3742,7 +3833,7 @@ class CircuitAnalyzer:
                     m_new_str = m_now
 
                     # 9. 检查是否需要补偿 (比较 W比值 和 目标W/L比值)
-                    # 数学上, W_new/W_ref = r_raw_target (因为 L_new=L_ref)
+                    # 数学上, 要让W_new/W_ref = r_raw_target (因为 L_new=L_ref)
                     if abs(r_now_W_ratio - r_raw_target) > 1e-9:
                         print(f"    [补偿需求]: r_now_W ({r_now_W_ratio:.4f}) != r_raw_target ({r_raw_target:.4f})")
 
