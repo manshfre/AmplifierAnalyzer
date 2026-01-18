@@ -1,3 +1,4 @@
+from __future__ import annotations
 import copy
 import traceback
 import itertools
@@ -6,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Callable, Set, Optional, DefaultDict, Tuple, Any, Union
 from collections import defaultdict
-from parameter_manager import ParameterManager
+from enum import Enum, auto
 
 # ------------------------------
 # 核心电路分析器
@@ -30,164 +31,265 @@ class CircuitAnalyzer:
     # ------------------------------
     # 1. 内部类定义
     # ------------------------------
-    class DeviceTags:       #器件标签类，用于给器件打标签，使用方法为Device.tags.add(DeviceTags.DIODE_MOS)
-        DIODE_MOS = "二极管连接MOS管"
-        # ---------------------级联----------------------
-        CASCODE_MAIN = "主级联"
-        CASCODE_SLAVE = "从级联"
-        # -------------------器件对----------------------
-        DIFF_POSITIVE = "正端输入管"
-        DIFF_NEGATIVE = "负端输入管"
-
-        OUTPORT_POSITIVE = "正输出端管" # 正输出端附近的管子
-        OUTPORT_NEGATIVE = "负输出端管" # 负输出端附近的管子
+    class AnalysisConfig:
+        """
+        [真理之源] AnalysisConfig
+        定义全架构统一的常量键。替代原有的 DeviceTags 类及分散的字符串。
         
-        OUTPUT_POSITIVE = "正输出管"  # 逻辑正输出管
-        OUTPUT_NEGATIVE = "负输出管"  # 逻辑负输出管
-        # --------------------电流镜----------------------
-        LV_MIRROR_UPPER_REF = "上层参考管"
-        LV_MIRROR_UPPER_BIAS = "上层偏置管"  # 上层参考管的偏置二极管，低压电流镜不一定有这个管子
-        LV_MIRROR_LOWER_REF = "下层参考管"
-        LV_MIRROR_UPPER_MIRROR = "上层镜像管"
-        LV_MIRROR_LOWER_MIRROR = "下层镜像管"
-        LV_MIRROR_BIAS_MIRROR = "偏置低压镜像管"
-        LV_MIRROR_PAIR = "低压镜像对管"
+        功能：
+        1. 提供所有架构层面的常量（Tags, Relations, Structures, Ports）。
+        2. 提供属性的中文描述映射。
+        3. 支持运行时动态添加/删除常量（用于扩展分析器能力）。
+        """
 
-        CURRENT_MIRROR_REF = "普通电流镜参考管"
-        CURRENT_MIRROR_MIRROR = "普通电流镜镜像管"
-        CURRENT_MIRROR_BIAS_MIRROR = "普通电流镜偏置镜像管"
-
-        ROOT_REF = "根参考管"  # 处在电流源路径中
-
-        IN_CURRENT_BEAM = "处在电流束"  # 用来判断是否为偏置管，偏置管即处在偏置电路中的管子
-        # ----------------------负载------------------------
-        LOAD_TYP = "典型负载"   # 电流镜镜像管，可以是多管
+        # =========================================================================
+        # 1. 常量定义区 (Constants Definitions)
+        # =========================================================================
         
-        LOAD_A_DIO = "有源电流镜二极管负载"
-        LOAD_A_TYP = "有源电流镜典型负载"  # 有源电流镜负载
+        # --- A. 结构与分组 Keys (Structure & Group Keys) ---
+        STR_DIFF_PAIR       = "DIFFERENTIAL_PAIR"      # 差分输入对
+        STR_CASCODE         = "CASCODE"                # 级联
 
-        LOAD_B = "双二极管负载"  # 两个二极连接形式的管子分别位于两条对称支路上
+        STR_STD_MIRROR      = "STD_CURRENT_MIRROR"     # 普通电流镜
 
-        LOAD_C = "对称负载管"  # 栅极接到除去输出电流支路的对称电流支路的对管（即非输出对、非共模检测对）
-        # ----------------共模检测----------------------
-        COMMON_OUTER = "外侧共模管" #接外部输入的共模管
-        COMMON_INNER = "内侧共模管" #接内部输出的共模管
+        STR_LV_MIRROR       = "LV_CURRENT_MIRROR"      # 低压电流镜
+        STR_LV_MIRROR_PAIR  = "LV_MIRROR_PAIR"         # 低压镜像对
 
-        COMMON_2MOS = "2管共模检测"  #A型共模检测
+        STR_LOAD_TYPICAL    = "LOAD_TYPICAL"           # 典型负载
+        STR_LOAD_A          = "LOAD_A"                 # A型负载
+        STR_LOAD_B          = "LOAD_B"                 # B型负载
+        STR_LOAD_C          = "LOAD_C"                 # C型负载
 
-        COMMON_4MOS = "4管共模检测"  #B型共模检测
-        # ----------------------RC-----------------------
-        COMPENSATE = "频率补偿"
+        STR_OUTPORT_PAIR    = "OUTPORT_PAIR"           # 输出端对
+        STR_OUTPUT_PAIR     = "OUTPUT_PAIR"            # 输出对
 
-        RC_COMMON_DETECT = "RC共模检测" #构成A型共模检测
+        STR_CM_DETECT_A     = "COMMON_DETECT_A"        # 共模检测A (2管)
+        STR_CM_DETECT_B     = "COMMON_DETECT_B"        # 共模检测B (4管)
+        STR_RC_CM_DETECT    = "RC_COMMON_DETECT"       # RC共模检测
 
-        SYM_CAPACITOR = "对称电容"      #一般指滤波电容
+        STR_FREQ_COMPENSATE = "FREQ_COMPENSATE"        # 频率补偿
+        STR_SYM_CAPACITOR   = "SYM_CAPACITOR"          # 对称电容
 
-        # ==================== 查询方法 ====================
-    
-        @classmethod
-        def list_tags(cls) -> Dict[str, str]:
-            """
-            查看所有已定义的器件标签
-            返回: {标签名称: 描述} 的字典
-            示例:
-                >>> tags = DeviceTags.list_tags()
-                >>> print(tags["DIODE_MOS"])  # 输出: '二极管连接MOS管'
-            """
-            return {
-                k: v 
-                for k, v in cls.__dict__.items() 
-                if not k.startswith('_') and isinstance(v, str)
-            }
+        STR_TAIL_INPUT      = "TAIL_CURRENT_INPUT"     # 输入尾电流源
+        STR_TAIL_COMMON     = "TAIL_CURRENT_COMMON"    # 公共尾电流源
+        STR_TAIL_OUTPUT     = "TAIL_CURRENT_OUTPUT"    # 输出尾电流源
 
-        @classmethod
-        def get_tag(cls, name: str) -> Optional[str]:
-            """
-            获取指定标签的描述
-            参数:
-                name: 标签名称（如 "DIODE_MOS"）
-            返回:
-                标签描述，若不存在则返回 None
-            示例:
-                >>> desc = DeviceTags.get_tag("DIODE_MOS")
-                >>> print(desc)  # 输出: '二极管连接MOS管'
-            """
-            return getattr(cls, name, None)
+        # --- B. 关系 Keys (Relation Keys) ---
+        REL_CASCODE_M2S          = "CASCODE_MAIN_TO_SLAVE"  #描述主从级联关系
 
-        # ==================== 修改方法 ====================
+        REL_STD_REF2MIRROR       = "STD_REF_TO_MIRROR"      #描述普通电流镜参考管的镜像管
+        REL_STD_REF2BIAS         = "STD_REF_TO_BIAS_MIRROR"     #描述普通电流镜参考管的偏置镜像管
+        REL_STD_ROOT2BIAS        = "STD_ROOT_TO_BIAS_MIRROR"    #描述根参考管的偏置镜像管
 
-        @classmethod
-        def add_tag(cls, name: str, description: str) -> None:
-            """
-            添加新的器件标签或修改现有标签
-            参数:
-                name: 标签名称（必须全大写，可含下划线）
-                description: 标签描述文本
-            异常:
-                ValueError: 名称格式不规范
-            示例:
-                >>> DeviceTags.add_tag("FEEDBACK_RES", "反馈电阻")
-                >>> DeviceTags.add_tag("CUSTOM_TAG", "我的自定义结构")
-            """
-            # 验证名称格式
-            if not name.isupper() or not name.replace("_", "").isalnum():
-                raise ValueError("标签名称必须为大写字母+下划线格式（如 MY_CUSTOM_TAG）")
+        REL_LV_LREF2UREF         = "LV_LREF_TO_UREF"
+        REL_LV_LREF2UBIAS        = "LV_LREF_TO_UBIAS"
+        REL_LV_LREF2TOKEN        = "LV_LREF_TO_TOKEN"
+
+        # --- C. 标签 Keys (Tag Keys) ---
+        TAG_DIODE_MOS            = "DIODE_MOS"
+        TAG_IN_CURRENT_BEAM      = "IN_CURRENT_BEAM"
+
+        TAG_CASCODE_MAIN         = "CASCODE_MAIN"
+        TAG_CASCODE_SLAVE        = "CASCODE_SLAVE"
+
+        TAG_DIFF_POS             = "DIFF_POSITIVE"
+        TAG_DIFF_NEG             = "DIFF_NEGATIVE"
+
+        TAG_OUTPORT_POS          = "OUTPORT_POSITIVE"
+        TAG_OUTPORT_NEG          = "OUTPORT_NEGATIVE"
+        TAG_OUTPUT_POS           = "OUTPUT_POSITIVE"
+        TAG_OUTPUT_NEG           = "OUTPUT_NEGATIVE"
+
+        TAG_STD_MIRROR_REF       = "STD_MIRROR_REF"
+        TAG_STD_MIRROR_MIRROR    = "STD_MIRROR_MIRROR"
+        TAG_STD_MIRROR_BIAS      = "STD_MIRROR_BIAS"
+        TAG_ROOT_REF             = "ROOT_REF"
+
+        TAG_LV_UPPER_REF         = "LV_UPPER_REF"
+        TAG_LV_LOWER_REF         = "LV_LOWER_REF"
+        TAG_LV_UPPER_BIAS        = "LV_UPPER_BIAS"
+        TAG_LV_UPPER_MIRROR      = "LV_UPPER_MIRROR"
+        TAG_LV_LOWER_MIRROR      = "LV_LOWER_MIRROR"
+        TAG_LV_BIAS_MIRROR       = "LV_BIAS_MIRROR"
+        TAG_LV_PAIR              = "LV_MIRROR_PAIR"
+
+        TAG_LOAD_TYP             = "LOAD_TYPICAL"
+        TAG_LOAD_A_DIO           = "LOAD_A_DIODE"
+        TAG_LOAD_A_TYP           = "LOAD_A_TYPICAL"
+        TAG_LOAD_B               = "LOAD_B"
+        TAG_LOAD_C               = "LOAD_C"
+
+        TAG_CM_OUTER             = "CM_OUTER"
+        TAG_CM_INNER             = "CM_INNER"
+        TAG_CM_2MOS              = "CM_2MOS"
+        TAG_CM_4MOS              = "CM_4MOS"
+
+        TAG_COMPENSATE           = "COMPENSATE"
+        TAG_RC_CM_DETECT         = "RC_CM_DETECT"
+        TAG_SYM_CAPACITOR        = "SYM_CAPACITOR"
+
+        # --- D. 端口 Keys (Port Keys) ---
+        PORT_POWER_POS           = "POWER_POSITIVE"
+        PORT_POWER_NEG           = "POWER_NEGATIVE"
+        PORT_INPUT_POS           = "INPUT_POSITIVE"
+        PORT_INPUT_NEG           = "INPUT_NEGATIVE"
+        PORT_OUTPUT_POS          = "OUTPUT_POSITIVE"
+        PORT_OUTPUT_NEG          = "OUTPUT_NEGATIVE"
+        PORT_COMMON_MODE         = "COMMON_MODE"
+        PORT_CURRENT_SOURCE      = "CURRENT_SOURCE"
+
+        # =========================================================================
+        # 2. 内部状态管理 (Internal State)
+        # =========================================================================
+        
+        # 存储所有默认的中文映射 (Immutable for reference)
+        _DEFAULT_CHINESE_MAP = {
+            STR_DIFF_PAIR:       "差分输入对",
+            STR_CASCODE:         "级联结构",
+            STR_STD_MIRROR:      "普通电流镜",
+            STR_LV_MIRROR:       "低压电流镜",
+            STR_LV_MIRROR_PAIR:  "低压镜像对",
+            STR_LOAD_TYPICAL:    "典型负载",
+            STR_LOAD_A:          "A型负载",
+            STR_LOAD_B:          "B型负载",
+            STR_LOAD_C:          "C型负载",
+            STR_OUTPORT_PAIR:    "输出端对",
+            STR_OUTPUT_PAIR:     "逻辑输出对",
+            STR_CM_DETECT_A:     "2管共模检测",
+            STR_CM_DETECT_B:     "4管共模检测",
+            STR_FREQ_COMPENSATE: "频率补偿",
+            STR_RC_CM_DETECT:    "RC共模检测",
+            STR_SYM_CAPACITOR:   "对称电容",
+            STR_TAIL_INPUT:      "输入尾电流源",
+            STR_TAIL_COMMON:     "公共尾电流源",
+            STR_TAIL_OUTPUT:     "输出尾电流源",
             
-            # 检查是否已存在（打印提示）
-            if hasattr(cls, name):
-                old_desc = getattr(cls, name)
-                print(f"[DeviceTags] 更新标签: {name} = '{old_desc}' -> '{description}'")
+            # Tags 的描述 (这里后续要补全)
+            TAG_DIODE_MOS:       "二极管连接MOS",
+            TAG_IN_CURRENT_BEAM: "处在电流束",
+            TAG_ROOT_REF:        "根参考管"
+        }
+
+        # 当前生效的映射 (Mutable)
+        _CHINESE_NAME_MAP = _DEFAULT_CHINESE_MAP.copy()
+        
+        # 记录运行时添加的 Keys (用于 reset)
+        _DYNAMIC_KEYS = set()
+
+        # =========================================================================
+        # 3. 管理方法 (Management Methods) - 补全原有 DeviceTags 的功能
+        # =========================================================================
+
+        @classmethod
+        def get_chinese_name(cls, key: str) -> str:
+            """
+            获取常量的中文描述。
+            对应旧版: DeviceTags.get_tag(name)
+            """
+            return cls._CHINESE_NAME_MAP.get(key, key)
+
+        @classmethod
+        def list_keys(cls, prefix: str = "") -> dict[str, str]:
+            """
+            列出指定类别的所有常量及其描述。
+            对应旧版: DeviceTags.list_tags()
+            
+            Args:
+                prefix: 筛选前缀，如 "TAG_", "STR_", "REL_", "PORT_"。留空则列出所有。
+            """
+            result = {}
+            # 遍历类属性，过滤掉私有属性和方法
+            for name, value in cls.__dict__.items():
+                if name.startswith("_") or not isinstance(value, str):
+                    continue
+                
+                if prefix and not name.startswith(prefix):
+                    continue
+                    
+                # 获取对应的中文描述，如果没有则显示 Key 本身
+                description = cls._CHINESE_NAME_MAP.get(name, name)
+                result[name] = f"{value} ({description})"
+            return result
+
+        @classmethod
+        def add_key(cls, attr_name: str, value: str, description: str = ""):
+            """
+            [动态扩展] 在运行时注册新的常量。
+            对应旧版: DeviceTags.add_tag()
+            
+            Args:
+                attr_name: 类属性名 (e.g., "TAG_CUSTOM_BLOCK")
+                value: 实际字符串值 (e.g., "CUSTOM_BLOCK")
+                description: 中文描述 (e.g., "自定义模块")
+            """
+            if hasattr(cls, attr_name):
+                print(f"[AnalysisConfig] 警告: 覆盖已有常量 {attr_name}")
             else:
-                print(f"[DeviceTags] 添加新标签: {name} = '{description}'")
-            
-            setattr(cls, name, description)
+                cls._DYNAMIC_KEYS.add(attr_name)
+                
+            setattr(cls, attr_name, value)
+            if description:
+                cls._CHINESE_NAME_MAP[attr_name] = description
+                
+            print(f"[AnalysisConfig] 已注册: {attr_name} = '{value}' ({description})")
 
         @classmethod
-        def remove_tag(cls, name: str) -> None:
+        def remove_key(cls, attr_name: str):
             """
-            删除指定的器件标签
-            参数:
-                name: 要删除的标签名称
-            异常:
-                AttributeError: 标签不存在
-            示例:
-                >>> DeviceTags.remove_tag("CUSTOM_TAG")
+            [动态扩展] 删除常量。
+            对应旧版: DeviceTags.remove_tag()
             """
-            if hasattr(cls, name):
-                delattr(cls, name)
-                print(f"[DeviceTags] 已删除标签: {name}")
-            else:
-                raise AttributeError(f"器件标签 '{name}' 不存在")
+            if not hasattr(cls, attr_name):
+                print(f"[AnalysisConfig] 错误: 常量 {attr_name} 不存在")
+                return
+            
+            # 从描述映射中移除
+            if attr_name in cls._CHINESE_NAME_MAP:
+                # 注意：默认映射中的值我们通常保留，或者仅移除动态添加的
+                if attr_name not in cls._DEFAULT_CHINESE_MAP: 
+                    del cls._CHINESE_NAME_MAP[attr_name]
+                    
+            # 从类属性中移除
+            delattr(cls, attr_name)
+            if attr_name in cls._DYNAMIC_KEYS:
+                cls._DYNAMIC_KEYS.remove(attr_name)
+                
+            print(f"[AnalysisConfig] 已移除: {attr_name}")
 
         @classmethod
-        def reset_to_defaults(cls) -> None:
+        def reset_to_defaults(cls):
             """
-            重置所有标签为默认定义（删除自定义标签）
-            警告: 此操作会删除所有运行时添加的标签
-            示例:
-                >>> DeviceTags.reset_to_defaults()
+            重置所有常量定义到初始状态。
+            对应旧版: DeviceTags.reset_to_defaults()
             """
-            # 获取默认标签列表
-            default_tags = {
-                'DIODE_MOS', 'CASCODE_MAIN', 'CASCODE_SLAVE', 
-                'DIFF_POSITIVE', 'DIFF_NEGATIVE', 'OUTPORT_POSITIVE', 'OUTPORT_NEGATIVE', 'OUTPUT_POSITIVE', 'OUTPUT_NEGATIVE',
-                'LV_MIRROR_UPPER_REF', 'LV_MIRROR_UPPER_BIAS', 'LV_MIRROR_LOWER_REF',
-                'LV_MIRROR_UPPER_MIRROR', 'LV_MIRROR_LOWER_MIRROR', 'LV_MIRROR_BIAS_MIRROR','LV_MIRROR_PAIR', 
-                'CURRENT_MIRROR_REF', 'CURRENT_MIRROR_MIRROR','CURRENT_MIRROR_BIAS_MIRROR', 'ROOT_REF', 'IN_CURRENT_BEAM',
-                'LOAD_A_DIO', 'LOAD_A_TYP', 'LOAD_B', 'LOAD_C', 'LOAD_TYP',
-                'COMMON_2MOS', 'COMMON_OUTER', 'COMMON_INNER', 'COMMON_4MOS',
-                'COMPENSATE', 'RC_COMMON_DETECT' , 'SYM_CAPACITOR'
-            }
+            # 1. 删除所有动态添加的属性
+            for attr_name in list(cls._DYNAMIC_KEYS):
+                if hasattr(cls, attr_name):
+                    delattr(cls, attr_name)
+            cls._DYNAMIC_KEYS.clear()
             
-            # 删除所有非默认标签
-            current_tags = {k for k in cls.__dict__.keys() 
-                        if not k.startswith('_') and isinstance(cls.__dict__[k], str)}
-            custom_tags = current_tags - default_tags
+            # 2. 重置描述映射
+            cls._CHINESE_NAME_MAP = cls._DEFAULT_CHINESE_MAP.copy()
             
-            for tag in custom_tags:
-                delattr(cls, tag)
-            
-            print(f"[DeviceTags] 已重置为默认值，删除 {len(custom_tags)} 个自定义标签")
+            print("[AnalysisConfig] 已重置为默认状态")
+
+        @classmethod
+        def get_all_structure_keys(cls) -> set[str]:
+            """辅助方法：获取所有已定义的结构 Key (以 STR_ 开头)"""
+            return {v for k, v in cls.__dict__.items() if k.startswith("STR_") and isinstance(v, str)}
+        
+        @classmethod
+        def get_all_relation_keys(cls) -> set[str]:
+            """辅助方法：获取所有已定义的结构 Key (以 STR_ 开头)"""
+            return {v for k, v in cls.__dict__.items() if k.startswith("REL_") and isinstance(v, str)}
+
+        @classmethod
+        def get_all_tag_keys(cls) -> set[str]:
+            """辅助方法：获取所有已定义的标签 Key (以 TAG_ 开头)"""
+            return {v for k, v in cls.__dict__.items() if k.startswith("TAG_") and isinstance(v, str)}
+
+    # 快捷引用配置中心，方便类内部使用 self.AC.STR_XXX
+    AC = AnalysisConfig
 
     class CircuitPorts:
         """
@@ -361,61 +463,6 @@ class CircuitAnalyzer:
             cls.CURRENT_SOURCE = {"IREF", "IIN"}
             print("[CircuitPort] 已重置所有端口为默认值")
 
-    class SubStructureType:
-        """代表分析器可以识别的子结构"""
-
-        def __init__(self, type_name: str, required_tags: Set[str],
-                     constraint_rules: Callable[[List['CircuitAnalyzer.Device']], List[str]],
-                     aggregation_rule: Callable):
-            self.type_name = type_name      #子结构名称，str，默认使用中文
-            self.required_tags = required_tags        #子结构所包含的器件应该具有的标签，Set[str]
-            self.constraint_rules = constraint_rules    #子结构中器件间的参数约束，输入为Device类List，输出为约束字符串List
-            self.aggregation_rule = aggregation_rule    #获取并判断一组器件是否属于该子结构，是则登记
-
-    @dataclass
-    class DeviceSub:
-        """存储每个Device所属子结构实例索引"""
-        sub_type: str
-        sub_id: str
-        
-    @dataclass
-    class CircuitSub:
-        """存储整个Circuit所包含子结构实例"""
-        sub_id: str
-        type: str
-        members: List[str]
-        constraints: List[str]
-
-    @dataclass
-    class Device:
-        """存储analyzer识别到的元器件"""
-        name: str   #器件名称
-        type: str   #器件类型引用
-        terminals: Dict[str, str]   #端口字典，键为端口名称，值为连接的网络名称
-        params: Dict[str, str]  #参数字典，键为参数名称，值为参数值字符串
-        tags: Set[str] = field(default_factory=set) #器件标签
-        substructures: List['CircuitAnalyzer.DeviceSub'] = field(default_factory=list)    #器件所属子结构实例引用列表
-
-    @dataclass
-    class Circuit:
-        """
-            存储 Analyzer 识别到的整个电路。
-            初始化时所有容器自动建立为空。
-        """
-        # 识别到的器件字典
-        devices_dict: Dict[str, 'CircuitAnalyzer.Device'] = field(default_factory=dict)
-
-        # 登记的子结构（电路中实际存在的子结构）
-        substructures: List['CircuitAnalyzer.CircuitSub'] = field(default_factory=list)
-        # 电流路径
-        current_paths: List[List[str]] = field(default_factory=list)
-        # 电流束
-        current_beams: Dict[str, List[List[str]]] = field(default_factory=dict)
-        # 电流束路径
-        current_beam_paths: Dict[str, List[Set[str]]] = field(default_factory=dict)
-        # 电流束网络
-        beam_net_sets: Dict[str, Set[str]] = field(default_factory=dict)
-
     class APPConfig:
         """
         别名-端口-参数配置中心（Alias-Port-Parameter Configuration）
@@ -434,7 +481,7 @@ class CircuitAnalyzer:
         - NMOS与PMOS的PORT_CONFIG必须相等
         - CAPACITOR与RESISTOR的PORT_CONFIG必须相等
         - NMOS与PMOS的PARAM_CONFIG必须相等
-        这种关联性后续要进行处理
+        这种关联性后续要进行处理，需要考虑要不要为值添加说明（改成dict[str,dict[str,str]]）
         
         **键（大写标识符）代表逻辑上的各种器件类型，不可增删改，仅可修改其对应值**
         """
@@ -626,88 +673,441 @@ class CircuitAnalyzer:
                 for key in cls.ALIAS_CONFIG.keys()
             }
 
+    @dataclass
+    class DeviceSub:
+        """存储每个Device所属子结构实例索引"""
+        sub_type: str
+        sub_id: str
+
+    @dataclass
+    class Device:
+        """存储analyzer识别到的元器件"""
+        name: str   #器件名称
+        type: str   #器件类型引用
+        terminals: Dict[str, str]   #端口字典，键为端口名称，值为连接的网络名称
+        params: Dict[str, str]  #参数字典，键为参数名称，值为参数值字符串
+        tags: Set[str] = field(default_factory=set) #器件标签
+        substructures: List['CircuitAnalyzer.DeviceSub'] = field(default_factory=list)    #器件所属子结构实例引用列表
+
+    # =============================================================================
+    # 2. 约束对象协议 (Constraint Protocol)
+    # =============================================================================
+
+    class ConstraintType(Enum):
+        # 这里RATIO根本没用上
+        EQUAL   = auto()    # 强相等 (l=l, fw=fw)
+        RATIO_W = auto()    # 宽度比例 (fw_target = fw_source * r_raw)
+        # SUM   = auto()    # 预留：求和关系
+
+    @dataclass
+    class Constraint:
+        """
+        [协议] 描述两个器件参数之间的约束关系。
+        替代了原有的字符串 "M1_fw = M2_fw"。
+        """
+        target_dev_name: str
+        target_param: str
+        source_dev_name: str
+        source_param: str
+        type: "CircuitAnalyzer.ConstraintType" = CircuitAnalyzer.ConstraintType.EQUAL #type: ignore
+        
+        def __repr__(self):
+            op = "==" if self.type == CircuitAnalyzer.ConstraintType.EQUAL else "~="
+            return f"Constraint({self.target_dev_name}.{self.target_param} {op} {self.source_dev_name}.{self.source_param})"
+
+        # --- 辅助构造工厂方法 ---
+        @staticmethod
+        def eq(target: str, source: str, param: str) -> 'CircuitAnalyzer.Constraint':
+            """创建单个参数相等约束"""
+            return CircuitAnalyzer.Constraint(target, param, source, param, CircuitAnalyzer.ConstraintType.EQUAL)
+
+        @staticmethod
+        def all_eq(target: str, source: str) -> List['CircuitAnalyzer.Constraint']:
+            """创建标准MOS管三参数(l, fw, m)相等约束"""
+            return [
+                CircuitAnalyzer.Constraint.eq(target, source, 'l'),
+                CircuitAnalyzer.Constraint.eq(target, source, 'fw'),
+                CircuitAnalyzer.Constraint.eq(target, source, 'm')
+            ]
+
+    # =============================================================================
+    # 3. 逻辑载体 (SubStructure Type)
+    # =============================================================================
+
+    class SubStructureType:
+        """
+        [逻辑载体] 统一管理子结构的定义、识别与约束生成。
+        合并了原有的 SubStructureType 与 "StructureDefinition" 概念。
+        """
+        def __init__(
+            self,
+            key: str,                                        # AnalysisConfig.STR_XXX
+            display_name: str,                               # 中文显示名
+            required_tags: Set[str],                         # 必须包含的 Tags
+            aggregation_rule: Callable[[Set[str]], bool],    # 聚合校验逻辑
+            constraint_generator: Callable[[List[CircuitAnalyzer.Device]], List[CircuitAnalyzer.Constraint]] # 约束生成逻辑
+        ):
+            self.key = key
+            self.display_name = display_name
+            self.required_tags = required_tags
+            self.aggregation_rule = aggregation_rule
+            self.constraint_generator = constraint_generator
+
+        def generate_id(self, members: List[CircuitAnalyzer.Device]) -> str:
+            """统一生成 ID: KEY_Name1_Name2"""
+            # 假设 members 是 Device 对象，具有 name 属性
+            sorted_names = sorted([d.name for d in members])
+            return f"{self.key}_{'_'.join(sorted_names)}"
+
+    @dataclass
+    class CircuitSub:
+        """存储整个Circuit所包含子结构实例"""
+        sub_id: str
+        type: str
+        members: List[str]
+        constraints: List[CircuitAnalyzer.Constraint]
+
+    @dataclass
+    class Circuit:
+        """
+            存储 Analyzer 识别到的整个电路。
+            初始化时所有容器自动建立为空。
+        """
+        # 识别到的器件字典
+        devices_dict: Dict[str, 'CircuitAnalyzer.Device'] = field(default_factory=dict)
+
+        # 登记的子结构（电路中实际存在的子结构）
+        substructures: List['CircuitAnalyzer.CircuitSub'] = field(default_factory=list)
+        # 电流路径
+        current_paths: List[List[str]] = field(default_factory=list)
+        # 电流束
+        current_beams: Dict[str, List[List[str]]] = field(default_factory=dict)
+        # 电流束路径
+        current_beam_paths: Dict[str, List[Set[str]]] = field(default_factory=dict)
+        # 电流束网络
+        beam_net_sets: Dict[str, Set[str]] = field(default_factory=dict)
+
+    class ConstraintLibrary:
+        """
+        [规则库] ConstraintLibrary
+        
+        设计原则：
+        1. 严格复刻 temprefine.py 中的原始约束逻辑。
+        2. 普通镜像管不生成 fw/m 约束（交由后续 r_raw 校准处理）。
+        3. 统一使用 AnalysisConfig 中的常量。
+        """
+        # =========================================================================
+        # 1. 基础配对规则 (保持原样)
+        # =========================================================================
+
+        @staticmethod
+        def rule_pair_strict(members: List['CircuitAnalyzer.Device']) -> List['CircuitAnalyzer.Constraint']:
+            """
+            [严格配对] 对应: 差分对, 输出对, 共模检测A, C型负载, 典型负载(pair部分)
+            原始逻辑: 成员间 fw/l/m 完全相等。
+            """
+            if len(members) < 2:
+                return []
+            
+            ref = members[0]
+            
+            constraints = []
+            for target in members[1:]:
+                constraints.extend(CircuitAnalyzer.Constraint.all_eq(target.name, ref.name))
+                
+            return constraints
+
+        # =========================================================================
+        # 2. 级联结构规则 (保持原样)
+        # =========================================================================
+
+        @staticmethod
+        def rule_cascode(members: List['CircuitAnalyzer.Device']) -> List['CircuitAnalyzer.Constraint']:
+            """
+            [级联]
+            原始逻辑: 找到 Main，所有 Slave 的 l/fw/m 必须与 Main 相同。
+            """
+            AC = CircuitAnalyzer.AnalysisConfig
+            constraints = []
+            
+            try:
+                main = next(d for d in members if AC.TAG_CASCODE_MAIN in d.tags)
+            except StopIteration:
+                return [] 
+                
+            for dev in members:
+                if dev.name == main.name:
+                    continue
+                constraints.extend(CircuitAnalyzer.Constraint.all_eq(dev.name, main.name))
+                
+            return constraints
+
+        # =========================================================================
+        # 3. 电流镜规则 (严格复刻原始逻辑)
+        # =========================================================================
+
+        @staticmethod
+        def rule_std_mirror(members: List['CircuitAnalyzer.Device']) -> List['CircuitAnalyzer.Constraint']:
+            """
+            [普通电流镜]
+            原始逻辑复刻:
+            - 所有镜像管: l 必须约束 (m.l = ref.l)。
+            - 偏置镜像管 (BIAS):
+                - 若 Ref 是 ROOT_REF: 偏置管之间 fw/m 互等 (独立于 Ref)。
+                - 若 Ref 非 ROOT_REF: 偏置管 fw/m = Ref.fw/m。
+            - 普通镜像管: **不生成** fw/m 约束 (原代码未对非偏置管生成 fw/m 约束字符串)。
+            """
+            AC = CircuitAnalyzer.AnalysisConfig
+            constraints = []
+            
+            try:
+                ref = next(d for d in members if AC.TAG_STD_MIRROR_REF in d.tags)
+            except StopIteration:
+                return [] # "# 错误：普通电流镜缺少参考管"
+
+            is_ref_root = AC.TAG_ROOT_REF in ref.tags
+            bias_mirror_names = []  # 用于 Root Ref 时的互锁
+
+            for m in members:
+                if m.name == ref.name:
+                    continue
+                
+                # --- 1. l 约束  ---
+                # 原代码: base = [f"{m.name}_l = {ref.name}_l"]
+                constraints.append(CircuitAnalyzer.Constraint.eq(m.name, ref.name, 'l'))
+
+                is_bias = AC.TAG_STD_MIRROR_BIAS in m.tags
+
+                # --- 2. fw/m 约束 ---
+                if is_bias:
+                    if is_ref_root:
+                        # Case 1: 收集起来稍后互锁
+                        bias_mirror_names.append(m.name)
+                    else:
+                        # Case 2: 非Root Ref，偏置管严格跟随 Ref
+                        # 原代码: base.extend([f"{m.name}_m = {ref.name}_m", f"{m.name}_fw = {ref.name}_fw"])
+                        constraints.append(CircuitAnalyzer.Constraint.eq(m.name, ref.name, 'm'))
+                        constraints.append(CircuitAnalyzer.Constraint.eq(m.name, ref.name, 'fw'))
+                
+                # 注意：对于普通镜像管 (is_bias=False)，原代码在此处不生成 fw/m 约束。
+                # 它们将在 _precompute_r_raw_map 和 _calibrate_device_params 阶段被处理。
+
+            # --- 3. 根参考管的偏置镜像管互锁 ---
+            if is_ref_root and len(bias_mirror_names) > 1:
+                first_m_name = bias_mirror_names[0]
+                for other_m_name in bias_mirror_names[1:]:
+                    # 原代码: constraints.extend([f"{other_m}_m = {first_m}_m", f"{other_m}_fw = {first_m}_fw"])
+                    constraints.append(CircuitAnalyzer.Constraint(other_m_name, 'm', first_m_name, 'm'))
+                    constraints.append(CircuitAnalyzer.Constraint(other_m_name, 'fw', first_m_name, 'fw'))
+
+            return constraints
+
+        @staticmethod
+        def rule_lv_mirror(members: List['CircuitAnalyzer.Device']) -> List['CircuitAnalyzer.Constraint']:
+            """
+            [低压电流镜]
+            原始逻辑复刻:
+            1. 上层参考管 (Upper Ref) 与 下层参考管 (Lower Ref): fw/l/m 全等。
+            2. 镜像管 (无论是 Upper 还是 Lower):
+            - l: 始终等于 Lower Ref.l。
+            - 若为偏置镜像管 (BIAS): fw/m 等于 Lower Ref.fw/m。
+            - 若为普通镜像管: **不生成** fw/m 约束。
+            """
+            AC = CircuitAnalyzer.AnalysisConfig
+            constraints = []
+            
+            try:
+                # 原代码: [d for d in members if self.DeviceTags.LV_MIRROR_UPPER_REF in d.tags][0]
+                upper_ref = next(d for d in members if AC.TAG_LV_UPPER_REF in d.tags)
+                lower_ref = next(d for d in members if AC.TAG_LV_LOWER_REF in d.tags)
+            except StopIteration:
+                return [] # "# 错误：低压电流镜成员不完整"
+
+            # 1. 上下参考管全等
+            # 原代码: constraints.extend([f"{upper_ref.name}_fw = {lower_ref.name}_fw", ...])
+            constraints.extend(CircuitAnalyzer.Constraint.all_eq(upper_ref.name, lower_ref.name))
+
+            # 获取所有镜像管 (包括 Upper Mirror, Lower Mirror, Bias Mirror)
+            # 在 Graph 架构中它们都通过 relation 连接，这里直接遍历 members 排除 refs
+            refs = {lower_ref.name, upper_ref.name}
+            
+            for m in members:
+                if m.name in refs or AC.TAG_LV_UPPER_BIAS in m.tags:
+                    continue
+                
+                # --- l 约束 (始终应用) ---
+                # 原代码对 Upper/Lower Mirror 都执行: base = [f"{m.name}_l = {lower_ref.name}_l"]
+                constraints.append(CircuitAnalyzer.Constraint.eq(m.name, lower_ref.name, 'l'))
+                
+                # --- fw/m 约束 (仅针对偏置管) ---
+                is_bias = AC.TAG_LV_BIAS_MIRROR in m.tags
+                
+                if is_bias:
+                    # 原代码: if ...BIAS_MIRROR...: base.extend([m=m, fw=fw])
+                    constraints.append(CircuitAnalyzer.Constraint.eq(m.name, lower_ref.name, 'm'))
+                    constraints.append(CircuitAnalyzer.Constraint.eq(m.name, lower_ref.name, 'fw'))
+
+            return constraints
+
+        # =========================================================================
+        # 4. 负载与多管结构规则 (保持原样)
+        # =========================================================================
+
+        @staticmethod
+        def rule_load_typical(members: List['CircuitAnalyzer.Device']) -> List['CircuitAnalyzer.Constraint']:
+            """
+            [典型负载] / [A型/B型负载] / [4管共模检测]
+            原始逻辑: 最后一个器件作为参考，其他器件向其看齐 (fw/l/m 全等)。
+            """
+            if not members:
+                return []
+                
+            ref = members[-1]
+            constraints = []
+            
+            for dev in members[:-1]:
+                constraints.extend(CircuitAnalyzer.Constraint.all_eq(dev.name, ref.name))
+                
+            return constraints
+
+        # =========================================================================
+        # 5. 无源器件 (RC) 规则 (保持原样)
+        # =========================================================================
+
+        @staticmethod
+        def rule_rc_group(members: List['CircuitAnalyzer.Device']) -> List['CircuitAnalyzer.Constraint']:
+            """
+            [RC组] 适用于: 频率补偿, RC共模检测, 对称电容
+            原始逻辑:
+            - 电阻: segW, segL 相等 (如果存在)。
+            - 电容: l 相等 (如果存在)。
+            """
+            constraints = []
+            resistors = [d for d in members if d.type == "Resistor"]
+            capacitors = [d for d in members if d.type == "Capacitor"]
+            
+            # 约束电阻
+            if len(resistors) > 1:
+                ref_r = resistors[0]
+                for r in resistors[1:]:
+                    if "segW" in ref_r.params:
+                        constraints.append(CircuitAnalyzer.Constraint.eq(r.name, ref_r.name, "segW"))
+                    if "segL" in ref_r.params:
+                        constraints.append(CircuitAnalyzer.Constraint.eq(r.name, ref_r.name, "segL"))
+
+            # 约束电容
+            if len(capacitors) > 1:
+                ref_c = capacitors[0]
+                has_l = "l" in ref_c.params
+                
+                for c in capacitors[1:]:
+                    if has_l:
+                        constraints.append(CircuitAnalyzer.Constraint.eq(c.name, ref_c.name, "l"))
+                        
+            return constraints
+        
+    def _init_substructure_registry(self):
+        """
+        [核心] 初始化子结构类型注册表。
+        将 Config Key (是什么) 映射到 Logic (怎么识别) 和 Rules (怎么约束)。
+        """
+        AC = self.AC
+        CL = self.ConstraintLibrary
+        
+        # 辅助函数：简化注册代码
+        def reg(key, display, tags, rule_func):
+            self.substructure_types[key] = self.SubStructureType(
+                key=key,
+                display_name=display,
+                required_tags=tags,
+                aggregation_rule=lambda roles: tags.issubset(roles),
+                constraint_generator=rule_func
+            )
+
+        # --- A. 基础结构 ---
+        # 差分输入对
+        reg(AC.STR_DIFF_PAIR, "差分输入对", {AC.TAG_DIFF_POS, AC.TAG_DIFF_NEG}, CL.rule_pair_strict)
+        # 级联
+        reg(AC.STR_CASCODE, "级联结构", {AC.TAG_CASCODE_MAIN, AC.TAG_CASCODE_SLAVE}, CL.rule_cascode)
+
+        # --- B. 电流镜 ---
+        reg(AC.STR_STD_MIRROR, "普通电流镜", {AC.TAG_STD_MIRROR_REF, AC.TAG_STD_MIRROR_MIRROR}, CL.rule_std_mirror)
+        
+        # 低压电流镜需要检查4个标签
+        reg(AC.STR_LV_MIRROR, "低压电流镜", 
+            {AC.TAG_LV_LOWER_REF, AC.TAG_LV_UPPER_REF, AC.TAG_LV_UPPER_MIRROR, AC.TAG_LV_LOWER_MIRROR}, # 不考虑上层偏置管
+            CL.rule_lv_mirror)
+            
+        reg(AC.STR_LV_MIRROR_PAIR, "低压镜像对", {AC.TAG_LV_PAIR}, CL.rule_pair_strict)
+
+        # --- C. 负载与输出 ---
+        # 负载类通常复用 pair_strict 或 load_typical
+        reg(AC.STR_LOAD_TYPICAL, "典型负载", {AC.TAG_LOAD_TYP}, CL.rule_load_typical)
+        reg(AC.STR_LOAD_A, "A型负载", {AC.TAG_LOAD_A_DIO}, CL.rule_pair_strict)
+        reg(AC.STR_LOAD_B, "B型负载", {AC.TAG_LOAD_B}, CL.rule_pair_strict)
+        reg(AC.STR_LOAD_C, "C型负载", {AC.TAG_LOAD_C}, CL.rule_pair_strict) # 原逻辑用 pair_constraint
+
+        # 输出端对 / 输出对
+        reg(AC.STR_OUTPORT_PAIR, "输出端对", {AC.TAG_OUTPORT_POS, AC.TAG_OUTPORT_NEG}, CL.rule_pair_strict)
+        reg(AC.STR_OUTPUT_PAIR, "逻辑输出对", {AC.TAG_OUTPUT_POS, AC.TAG_OUTPUT_NEG}, CL.rule_pair_strict)
+
+        # --- D. 共模与 RC ---
+        # 共模检测
+        reg(AC.STR_CM_DETECT_A, "2管共模检测", {AC.TAG_CM_2MOS}, CL.rule_pair_strict)
+        reg(AC.STR_CM_DETECT_B, "4管共模检测", {AC.TAG_CM_4MOS}, CL.rule_load_typical) # 复用 typical load 逻辑
+
+        # RC 结构
+        reg(AC.STR_FREQ_COMPENSATE, "频率补偿", {AC.TAG_COMPENSATE}, CL.rule_rc_group)
+        reg(AC.STR_RC_CM_DETECT, "RC共模检测", {AC.TAG_RC_CM_DETECT}, CL.rule_rc_group)
+        reg(AC.STR_SYM_CAPACITOR, "对称电容", {AC.TAG_SYM_CAPACITOR}, CL.rule_rc_group) # 复用 rc group 逻辑
+
     # ------------------------------
-    # 2.初始化
+    # 3.初始化
     # ------------------------------
     def __init__(self):
+        """
+        CircuitAnalyzer 初始化
+        遵循原则：
+        1. 必须使用 Graph-Driven Storage (tag_index, relation_graph, device_groups)。
+        2. 禁止初始化特定业务逻辑的缓存列表 (如 diff_pair_positive, cascode_cache 等)。
+        3. 所有子结构类型注册必须通过 registry 完成。
+        """
+        # 1. 基础拓扑容器
         self.circuit = self.Circuit()   
-        self.net_device_map: DefaultDict[str, List[str]] = defaultdict(list)  # 网络-器件映射,网络名小写
-
+        self.net_device_map: DefaultDict[str, List[str]] = defaultdict(list)
         self.config_complete: bool = False
 
-        self.copy_tube_r_raw_map: Dict[str, Tuple[str, float]] = {}  # 存储 (ref_dev_name, r_raw)
-
-        # 子结构类型注册表
-        self.substructure_types: Dict[str, 'CircuitAnalyzer.SubStructureType'] = {}
-        # -------------------------------------缓存初始化---------------------------------------
-        self.diff_pair_negative: List[str] = []  # 临时存储差分管
-        self.diff_pair_positive: List[str] = []
-        self.diff_pair: List[str] = []  # 输入对名称
-
-        self.common_outer: List[str] = []  # 外侧共模管名称
-        self.common_detect2: List[str] = []  # 2管共模检测名称
-        self.common_detect4: List[str] = []  # 4管共模检测名称
-
-        self.positive_outport: List[str] = []  # 临时存储输出管
-        self.negative_outport: List[str] = []
-        self.outport_pair: List[List[str]] = []  # 输出端对名称
-        self.output_pair: List[str] = []    # 输出对名称
-
-        self.compensate: List[str] = []  # 频率补偿器件名称
-        self.rc_common_detect: List[str] = []  # RC共模检测器件名称
-        self.capacitor_pair: List[List[str]] = []  # 对称电容名称（滤波电容）
-
-        self.cascode_cache: Dict[str, List[str]] = {}  # 级联，键为主级联管子名称，值为从级联管子名称
-
-        self.current_cache: Dict[str, List[str]] = {}  # 普通电流镜，先生成，后会被低压电流镜删减。键为参考管名称，值为镜像管名称
-        self.root_bias_mirror: Dict[str,List[str]] = {}   #根偏置镜像管(不同根参考管的根偏置镜像管之间的电流匹配没做)
-        # 低压电流镜，键为下层管名称，值中第一个str代表偏置电压提供方式，第二个是上层参考管
-        self.lv_current: Dict[str, List[str]] = {} #如果MOS偏置，第三个是偏置MOS管名称，如果不是，第三个是镜像管名称
-
-        self.typ_load: List[List[str]] = []     #典型负载名称
-        self.A_load: List[List[str]] = []       #有源电流镜负载名称
-        self.B_load: List[List[str]] = []       #二极管负载名称
-        self.C_load: List[List[str]] = []     #对称负载管，栅极接对称支路的对管（非输出对，非共模检测）
-
-        # =========================================================
-        # [重构核心 1]：泛型标签索引 (Tag Index)
-        # 替代了原代码中几十个 self.diff_pair_positive 等列表
-        # 结构: { "标签名": {"dev1", "dev2", ...} }
-        # =========================================================
+        # 2. [核心] 图驱动存储 (Graph-Driven Storage)
+        # 替代原有的 self.diff_pair_positive, self.outport_pair 等分散列表
+        # 结构: { TAG_KEY: {dev_name, ...} }
         self.tag_index: DefaultDict[str, Set[str]] = defaultdict(set)
-
-        # =========================================================
-        # [重构核心 2]：通用关系图谱 (Relation Graph)
-        # 替代了 cascode_cache, current_cache, lv_current 等专用字典
-        # 结构: { "source_dev_name": { "relation_type": ["target_dev_name", ...] } }
-        # 例如: { "M1": { "current_mirror_slave": ["M2", "M3"], "cascode_slave": ["M4"] } }
-        # =========================================================
-        self.relation_gragh: DefaultDict[str, DefaultDict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
-
-        # 3. [Device Groups] [新增] 用于存储成组的器件列表 (List of Lists)
-        # 替代原有的 self.outport_pair, self.typ_load, self.common_tail 等
-        # 结构: { "group_type": [ ["M1", "M2"], ["M3", "M4"] ] }
+        
+        # 替代原有的 cascode_cache, lv_current 等分散字典
+        # 结构: { source_name: { REL_KEY: [target_name, ...] } }
+        self.relation_graph: DefaultDict[str, DefaultDict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        
+        # 替代原有的 outport_pair, typ_load 等 List[List]
+        # 结构: { GROUP_KEY: [[name1, name2], ...] }
         self.device_groups: DefaultDict[str, List[List[str]]] = defaultdict(list)
 
-        self.top_nodes: List['CircuitAnalyzer.Device'] = []  # 顶层节点器件列表，指电路中连接在电源正端的器件，是电路中电流路径的起点
-        # 这些缓存将在未来考虑如何处理
-        self._flat_beam_cache: Optional[List[Set[str]]] = None  # 用于缓存压平的电流束路径，每个元素是一条电流束路径所包含的所有器件，用于对称电容识别
-        self.constraint_groups: List[List[str]] = []        #电路的参数组合，偏多，因为没考虑主电路电流匹配
+        # 3. 逻辑注册表
+        self.substructure_types: Dict[str, 'CircuitAnalyzer.SubStructureType'] = {}
+        self._init_substructure_registry()
+        
+        # 存储最终生成的参数等效组 (List of param strings)
+        self.constraint_groups: List[List[str]] = []
+        
+        # 4. 分析结果存储
+        # 存储 r_raw 真值计算结果: { copy_name: (ref_name, r_raw_value) }
+        self.copy_tube_r_raw_map: Dict[str, Tuple[str, float]] = {} 
 
-        self.calibrate_params: Dict[str,Dict[str,str]] = {}     #更新后的电路参数配置，需要重构
-        self.device_params: Dict[str, Dict[str, str]] = {} # 原始参数，需要被重构
-
-        self.input_tail: List[str] = []     #输入支路尾电流源
-        self.output_tail: List[List[str]] = []    #输出支路电流源对
-        self.common_tail: List[List[str]] = []    #输入输出公共尾电流源对
-
-        #-----------------------------------------电路独立参数生成、修改初始解----------------------------------------------
-        # 预保存复制管电流复制比例
-        # self._precompute_r_raw_map()
-        # # 生成全局约束组
-        # self._generate_constraint_groups()
-        # # 修改初始解
-        # self._calibrate_device_params()
+        # 参数存储 (保留用于参数校准)
+        self.calibrate_params: Dict[str,Dict[str,str]] = {}
+        self.device_params: Dict[str, Dict[str, str]] = {}
+        
+        # 辅助缓存 (仅保留极少数必要的中间态)
+        self.top_nodes: List['CircuitAnalyzer.Device'] = []
+        self._flat_beam_cache: Optional[List[Set[str]]] = None
 
     @classmethod
     def from_parsed_data(cls, devices_information: List[List[Any]], config_complete: bool):
@@ -748,18 +1148,21 @@ class CircuitAnalyzer:
         
             # 验证通过，Device实例化
             name = dev_info[0]
-            # 创建Device实例（params保留所有键值）
-            cls.circuit.devices_dict[name] = cls.Device(
+            analyzer.device_params[name] = params
+
+            # 2. 创建Device实例并存入字典
+            device_obj = cls.Device(
                 name=name,
                 type=dev_type_str,
                 terminals=terminals,
                 params=params
             )
+            analyzer.circuit.devices_dict[name] = device_obj
 
             # 构建网络-器件映射
             nets = set(net for net in terminals.values())  # 避免重复添加
             for net in nets:
-                cls.net_device_map[net.lower()].append(name)
+                analyzer.net_device_map[net.lower()].append(name)
 
         analyzer._run_analysis_pipeline()
         return analyzer
@@ -922,9 +1325,6 @@ class CircuitAnalyzer:
         根据config_complete标志决定是否执行参数校准
         这里的流程要确保正确
         """
-        # -----------------------------------------子结构注册-----------------------------------------------
-        self._register_substructure_types()
-
         # ----------------------------------------特殊器件检测---------------------------------------------
         self._mark_obvious_tags()  # 标记二极管器件、输入器件、顶层节点、共模检测器件
         self._mark_outport_devices()  # 标记输出端管与频率补偿RC和共模检测RC
@@ -993,6 +1393,13 @@ class CircuitAnalyzer:
         """检查网络是否连接到正电源或负电源"""
         return self._net_matches(net,self.CircuitPorts.POWER_POSITIVE) or self._net_matches(net,self.CircuitPorts.POWER_NEGATIVE)
 
+    def _is_net_power(self, net_name: str) -> bool:
+        """检查是否为正电源"""
+        return self._net_matches(net_name, self.CircuitPorts.POWER_POSITIVE)
+    
+    def _is_net_ground(self, net_name: str) -> bool:
+        """检查是否为地/负电源"""
+        return self._net_matches(net_name, self.CircuitPorts.POWER_NEGATIVE)
     # ------------对称电容识别辅助函数-----------
     def _get_mos_on_net(self, net: str, exclude_devices: Set[str]) -> Set[str]:
         """获取指定网络上连接的MOS管，排除指定器件"""
@@ -1036,21 +1443,25 @@ class CircuitAnalyzer:
         电容不被视作构成电流路径（少了这个电容电路仍可以工作，只是指标恶化）
         """
         if device.type == "PMOS":
-            s_net = device.terminals.get("S")
-            return s_net is not None and self._net_matches(s_net, self.CircuitPorts.POWER_POSITIVE)
+            # PMOS 源极接电源
+            return self._is_net_power(device.terminals.get("S", ""))
         elif device.type == "NMOS":
-            d_net = device.terminals.get("D")
-            return d_net is not None and self._net_matches(d_net, self.CircuitPorts.POWER_POSITIVE)
+            # NMOS 漏极接电源
+            return self._is_net_power(device.terminals.get("D", ""))
         elif device.type == "Resistor":
+            # 电阻任一端接电源
             nets = list(device.terminals.values())
-            return any(self._net_matches(net, self.CircuitPorts.POWER_POSITIVE) for net in nets)
+            return any(self._is_net_power(net) for net in nets)
         return False
     
-    # ---------------------------------标签与缓存操作-----------------------------------------
-    def add_tag(self, device: Union[str, 'CircuitAnalyzer.Device'], tag: str):
+    # =========================================================================
+    # 2. 统一操作接口 (Unified Operations)
+    # =========================================================================
+
+    def add_tag(self, device: Union[str, 'Device'], tag: str):
         """
-        给器件打标签，并自动同步到索引缓存。
-        这是逻辑层唯一修改标签的入口，禁止直接操作 device.tags.add()
+        [统一接口] 给器件打标签并同步索引。
+        tag: 必须是 AnalysisConfig.TAG_XXX
         """
         if isinstance(device, str):
             device_obj = self.circuit.devices_dict.get(device)
@@ -1060,15 +1471,12 @@ class CircuitAnalyzer:
         else:
             device_obj = device
 
-        # 1. 更新 Model
         if tag not in device_obj.tags:
             device_obj.tags.add(tag)
-            # 2. 自动同步 Index (Cache)
             self.tag_index[tag].add(device_obj.name)
-            # print(f"[Debug] Tag Added: {device_obj.name} -> {tag}")
 
-    def remove_tag(self, device: Union[str, 'CircuitAnalyzer.Device'], tag: str):
-        """[核心接口] 移除标签并同步索引"""
+    def remove_tag(self, device: Union[str, 'Device'], tag: str):
+        """[统一接口] 移除标签"""
         if isinstance(device, str):
             device_obj = self.circuit.devices_dict.get(device)
         else:
@@ -1077,415 +1485,88 @@ class CircuitAnalyzer:
         if device_obj and tag in device_obj.tags:
             device_obj.tags.remove(tag)
             self.tag_index[tag].discard(device_obj.name)
+        else: 
+            print(f"删除器件标签{tag}失败")
 
-    def get_devices_by_tag(self, tag: str) -> List['CircuitAnalyzer.Device']:
+    def add_group(self, group_key: str, members: List[str]):
         """
-        获取拥有指定标签的所有器件对象
+        [统一接口] 记录一组器件。
+        group_key: 必须是 AnalysisConfig.STR_XXX
         """
-        names = self.tag_index.get(tag, set())
-        return [self.circuit.devices_dict[n] for n in names if n in self.circuit.devices_dict]
+        self.device_groups[group_key].append(members)
 
+    def add_relation(self, source: str, relation_key: str, target: str):
+        """
+        [统一接口] 记录器件关系。
+        relation_key: 必须是 AnalysisConfig.REL_XXX
+        """
+        self.relation_graph[source][relation_key].append(target)
+
+    def get_relations(self, source: str, relation_key: str) -> List[str]:
+        """
+        [统一接口] 获取关系目标列表。
+        安全读取：如果 source 或 relation_key 不存在，返回空列表，而不是报错。
+        """
+        # 即使 self.relation_graph 是 defaultdict，
+        # 使用 .get() 可以避免在仅读取时意外创建空的 source 条目。
+        source_relations = self.relation_graph.get(source)
+        if source_relations is None:
+            return []
+        
+        return source_relations.get(relation_key, [])
+    
     def get_names_by_tag(self, tag: str) -> Set[str]:
-        """获取拥有指定标签的所有器件名称"""
+        """[统一接口] 获取拥有标签的器件名"""
         return self.tag_index.get(tag, set()).copy()
     
-    # -------------------------------------记录与获取成组器件------------------------------------------
-    def add_group(self, group_type: str, members: List[str]):
-        """
-        记录一组器件 (替代 self.outport_pair.append([...]))
-        保持了 [M1, M2] 这种分组的独立性，不会与其他组混淆。
-        """
-        # 可以在这里做去重检查，如果需要的话
-        self.device_groups[group_type].append(members)
-        # print(f"[Debug] Group Added [{group_type}]: {members}")
-
-    def get_groups(self, group_type: str) -> List[List[str]]:
-        """
-        获取指定类型的所有分组
-        返回类型: List[List[str]]
-        未来要实现名称-标签-缓存-子结构协同
-        """
-        return self.device_groups[group_type]
-
-    # --------------------------------记录与获取主从器件-------------------------------------------------
-    def add_relation(self, source: str, relation_type: str, target: str):
-        """
-        记录器件间的关系 (替代 cascode_cache[master] = slaves 这种写法)
-        source: 源器件名称
-        relation_type: target与source的关系 (如 "cascode_slave", "current_mirror_slave")
-        """
-        self.relation_gragh[source][relation_type].append(target)
-
-    def get_relations(self, source: str, relation_type: str) -> List[str]:
-        """获取指定类型的关系目标"""
-        return self.relation_gragh[source][relation_type]
-    
-    # ---------------------------------------------子结构约束函数与子结构注册------------------------------------------------------
-    def _register_substructure_types(self):
-        """
-        注册子结构类型及约束规则
-        
-        这里之后要进行大规模重构
-        """
-        def pair_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """对约束：差分输入对、输出端对、输出对、共模检测A、各种负载
-            fw/l/m需相同
-            """
-            if len(members) != 2:
-                return list("")
-
-            base_constraints = [  # 正常约束
-                f"{members[0].name}_fw = {members[1].name}_fw",
-                f"{members[0].name}_l = {members[1].name}_l",
-                f"{members[0].name}_m = {members[1].name}_m"
-            ]
-            return base_constraints
-
-        def low_voltage_mirror_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """
-                所有管子的约束向下层参考管看齐，没考虑电阻
-                上层参考管的参数设置为与下层参考管完全相同
-                偏置镜像管的参数与下层参考管完全相同
-            """
-            try:
-                # 1. 查找关键器件
-                # 上层参考管
-                upper_ref = [d for d in members if self.DeviceTags.LV_MIRROR_UPPER_REF in d.tags][0]
-                # 下层参考管
-                lower_ref = [d for d in members if self.DeviceTags.LV_MIRROR_LOWER_REF in d.tags][0]
-
-                # 查找所有镜像管
-                upper_mirrors = [d for d in members if self.DeviceTags.LV_MIRROR_UPPER_MIRROR in d.tags]
-                lower_mirrors = [d for d in members if self.DeviceTags.LV_MIRROR_LOWER_MIRROR in d.tags]
-
-                constraints = []
-
-                # 上层参考管 与 lower_ref 的 fw/l/m 必须相同
-                constraints.extend([
-                    f"{upper_ref.name}_fw = {lower_ref.name}_fw",
-                    f"{upper_ref.name}_l = {lower_ref.name}_l",
-                    f"{upper_ref.name}_m = {lower_ref.name}_m"
-                ])
-
-                # 上层镜像管的 l 必须与 lower_ref 相同 (fw/m可不同)
-                for m in upper_mirrors:
-                    base = [f"{m.name}_l = {lower_ref.name}_l"]
-                    if self.DeviceTags.LV_MIRROR_BIAS_MIRROR in m.tags:
-                        base.extend([f"{m.name}_m = {lower_ref.name}_m", f"{m.name}_fw = {lower_ref.name}_fw"])
-                    constraints.extend(base)
-
-                # 下层镜像管的 l 必须与 lower_ref 相同 (fw/m可不同)
-                for m in lower_mirrors:
-                    base = [f"{m.name}_l = {lower_ref.name}_l"]
-                    if self.DeviceTags.LV_MIRROR_BIAS_MIRROR in m.tags:
-                        base.extend([f"{m.name}_m = {lower_ref.name}_m", f"{m.name}_fw = {lower_ref.name}_fw"])
-                    constraints.extend(base)
-
-                return constraints
-
-            except IndexError:
-                # 查找器件失败
-                return ["# 错误：低压电流镜成员不完整，无法生成约束"]
-
-        def cascode_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """级联约束：
-            l/fw/m均相同
-            """
-            main = [d for d in members if self.DeviceTags.CASCODE_MAIN in d.tags][0]
-            slaves = [d for d in members if self.DeviceTags.CASCODE_SLAVE in d.tags]
-            constraints = []
-            for s in slaves:
-                base = [f"{s.name}_l = {main.name}_l", f"{s.name}_fw = {main.name}_fw", f"{s.name}_m = {main.name}_m"]
-                constraints.extend(base)
-            return constraints
-
-        def load_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """负载约束：A型负载、B型负载、典型负载（2器件与4器件负载）
-            l/fw/m均相同
-            """
-            length = len(members)
-            base_constraints = []
-
-            if length > 0:  # 健壮性检查
-                ref_name = members[length - 1].name
-                for i in range(length - 1):
-                    dev_name = members[i].name
-                    base_constraints.extend([
-                        f"{dev_name}_fw = {ref_name}_fw",
-                        f"{dev_name}_l = {ref_name}_l",
-                        f"{dev_name}_m = {ref_name}_m"
-                    ])
-            return base_constraints
-
-        def current_mirror_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """
-            普通电流镜约束:
-            - l 始终约束
-            - Bias mirrors (有BIAS标签):
-                - If Ref is ROOT_REF: fw/m 相互约束, 但独立于 Ref（偏置管的电流复制比例相等）
-                - If Ref is not ROOT_REF: fw/m 约束为等于 Ref.fw/m（偏置管不可复制电流，即认为偏置电路中除电流源路径外所有电流路径电流相等）
-            """
-            try:
-                ref = [d for d in members if self.DeviceTags.CURRENT_MIRROR_REF in d.tags][0]
-            except IndexError:
-                return ["# 错误：普通电流镜缺少参考管"]
-
-            mirrors = [d for d in members if self.DeviceTags.CURRENT_MIRROR_MIRROR in d.tags]
-            constraints = []
-
-            is_ref_root = self.DeviceTags.ROOT_REF in ref.tags
-
-            bias_mirror_names = []  # 用于 Root Ref 的 fw 相互约束
-
-            for m in mirrors:
-                is_bias_mirror = self.DeviceTags.CURRENT_MIRROR_BIAS_MIRROR in m.tags
-
-                # 1. m/l 约束 (始终应用)
-                base = [ f"{m.name}_l = {ref.name}_l"]
-
-                # 2. fw 约束
-                if is_bias_mirror:
-                    if is_ref_root:
-                        # (Case 1): 参考管是Root，偏置镜像管彼此参数完全相同 
-                        bias_mirror_names.append(m.name)
-                    else:
-                        # (Case 3): 参考管非Root，偏置镜像管参数完全等于参考管
-                        base.extend([f"{m.name}_m = {ref.name}_m",f"{m.name}_fw = {ref.name}_fw"])
-
-                constraints.extend(base)
-
-            # 3. 根参考管的偏置镜像管彼此参数完全相同
-            if is_ref_root and len(bias_mirror_names) > 1:
-                first_m = bias_mirror_names[0]
-                for other_m in bias_mirror_names[1:]:
-                    constraints.extend([f"{other_m}_m = {first_m}_m",f"{other_m}_fw = {first_m}_fw"])
-
-            return constraints
-
-        def common_detect4_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """4管共模检测约束：4个管子的所有参数完全相等
-            fw/l/m需相同
-            """
-            base_constraints = [  # 正常约束
-                f"{members[0].name}_fw = {members[3].name}_fw",
-                f"{members[0].name}_l = {members[3].name}_l",
-                f"{members[0].name}_m = {members[3].name}_m",
-                f"{members[1].name}_fw = {members[3].name}_fw",
-                f"{members[1].name}_l = {members[3].name}_l",
-                f"{members[1].name}_m = {members[3].name}_m",
-                f"{members[2].name}_fw = {members[3].name}_fw",
-                f"{members[2].name}_l = {members[3].name}_l",
-                f"{members[2].name}_m = {members[3].name}_m"
-            ]
-            return base_constraints
-
-        def _rc_constraint_helper(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """
-            辅助函数：约束所有 R 参数相同，所有 C 参数相同。
-            (R 使用 segW/segL, C 使用 l)
-            """
-            constraints = []
-            resistors = [d for d in members if d.type == "Resistor"]
-            capacitors = [d for d in members if d.type == "Capacitor"]
-
-            # 约束电阻 (segW, segL)
-            if len(resistors) > 1:
-                ref_res = resistors[0]
-                ref_params = ref_res.params
-
-                # 检查参考电阻是否具有这些参数
-                has_segW = "segW" in ref_params
-                has_segL = "segL" in ref_params
-
-                for res in resistors[1:]:
-                    if has_segW:
-                        constraints.append(f"{res.name}_segW = {ref_res.name}_segW")
-                    if has_segL:
-                        constraints.append(f"{res.name}_segL = {ref_res.name}_segL")
-
-            # 约束电容 (l)
-            if len(capacitors) > 1:
-                ref_cap = capacitors[0]
-
-                # 检查参考电容是否具有 'l' 参数
-                if "l" in ref_cap.params:
-                    for cap in capacitors[1:]:
-                        constraints.append(f"{cap.name}_l = {ref_cap.name}_l")
-
-            return constraints
-
-        def compensate_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """频率补偿约束 (R同, C同)"""
-            return _rc_constraint_helper(members)
-
-        def rc_common_detect_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """RC共模检测约束 (R同, C同)"""
-            return _rc_constraint_helper(members)
-
-        def sym_capacitor_constraint(members: List['CircuitAnalyzer.Device']) -> List[str]:
-            """
-            对称电容约束：参数完全相等 
-            (l同)
-            """
-            constraints = []
-            capacitors = [d for d in members if d.type == "Capacitor"]
-
-            if len(capacitors) > 1:
-                ref_cap = capacitors[0]
-                # 检查参考电容是否具有 'l' 参数
-                if "l" in ref_cap.params:
-                    for cap in capacitors[1:]:
-                        constraints.append(f"{cap.name}_l = {ref_cap.name}_l")
-            return constraints
-
-        # ---------------------------------------子结构注册---------------------------------------------
-        #--------------------------------------能识别出的子结构类型---------------------------------------
-        self.circuit.substructure_types = {
-            "差分输入对": self.SubStructureType(
-                type_name="差分输入对",
-                required_tags={self.DeviceTags.DIFF_POSITIVE, self.DeviceTags.DIFF_NEGATIVE},
-                constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: 
-                self.DeviceTags.DIFF_POSITIVE in roles and self.DeviceTags.DIFF_NEGATIVE in roles
-            ),
-            "输出端对": self.SubStructureType(
-                type_name="输出端对",
-                required_tags={self.DeviceTags.OUTPORT_NEGATIVE, self.DeviceTags.OUTPORT_POSITIVE},
-                constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: 
-                self.DeviceTags.OUTPORT_NEGATIVE and self.DeviceTags.OUTPORT_POSITIVE in roles
-            ),
-            "级联": self.SubStructureType(
-                type_name="级联",
-                required_tags={self.DeviceTags.CASCODE_MAIN, self.DeviceTags.CASCODE_SLAVE},
-                constraint_rules=cascode_constraint,
-                aggregation_rule=lambda
-                    roles: self.DeviceTags.CASCODE_MAIN in roles and self.DeviceTags.CASCODE_SLAVE in roles
-            ),
-            "低压电流镜": self.SubStructureType(
-                type_name="低压电流镜",
-                required_tags={
-                    self.DeviceTags.LV_MIRROR_LOWER_REF,
-                    self.DeviceTags.LV_MIRROR_LOWER_MIRROR,
-                    self.DeviceTags.LV_MIRROR_UPPER_MIRROR,
-                    self.DeviceTags.LV_MIRROR_UPPER_REF
-                },
-                constraint_rules=low_voltage_mirror_constraint,
-                aggregation_rule=lambda roles: all(r in roles for r in [
-                    self.DeviceTags.LV_MIRROR_LOWER_REF,
-                    self.DeviceTags.LV_MIRROR_LOWER_MIRROR,
-                    self.DeviceTags.LV_MIRROR_UPPER_MIRROR,
-                    self.DeviceTags.LV_MIRROR_UPPER_REF
-                ])
-            ),
-            "低压镜像对": self.SubStructureType(
-                type_name="低压镜像对",
-                required_tags={self.DeviceTags.LV_MIRROR_PAIR},
-                constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: 
-                self.DeviceTags.LV_MIRROR_PAIR in roles
-            ),
-            "普通电流镜": self.SubStructureType(
-                type_name="普通电流镜",
-                required_tags={self.DeviceTags.CURRENT_MIRROR_REF, self.DeviceTags.CURRENT_MIRROR_MIRROR},
-                constraint_rules=current_mirror_constraint,
-                aggregation_rule=lambda
-                    roles: self.DeviceTags.CURRENT_MIRROR_REF in roles and self.DeviceTags.CURRENT_MIRROR_MIRROR in roles
-            ),
-            "A型负载": self.SubStructureType(
-                type_name="A型负载",
-                required_tags={self.DeviceTags.LOAD_A_DIO, self.DeviceTags.LOAD_A_TYP},
-                constraint_rules=load_constraint,
-                aggregation_rule=lambda
-                    roles: self.DeviceTags.LOAD_A_TYP and self.DeviceTags.LOAD_A_DIO in roles
-            ),
-            "B型负载": self.SubStructureType(
-                type_name="B型负载",
-                required_tags={self.DeviceTags.LOAD_B},
-                constraint_rules=load_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.LOAD_B in roles
-            ),
-            "C型负载": self.SubStructureType(
-                type_name="C型负载",
-                required_tags={self.DeviceTags.LOAD_C},
-                constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.LOAD_C in roles
-            ),
-            "典型负载": self.SubStructureType(
-                type_name="典型负载",
-                required_tags={self.DeviceTags.LOAD_TYP},
-                constraint_rules=load_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.LOAD_TYP in roles
-            ),
-            "共模检测A": self.SubStructureType(
-                type_name="共模检测A",
-                required_tags={self.DeviceTags.COMMON_OUTER, self.DeviceTags.COMMON_INNER, self.DeviceTags.COMMON_2MOS},
-                constraint_rules=pair_constraint,
-                aggregation_rule=lambda roles: lambda
-                    roles: self.DeviceTags.COMMON_OUTER and self.DeviceTags.COMMON_INNER and self.DeviceTags.COMMON_2MOS in roles
-            ),
-            "共模检测B": self.SubStructureType(
-                type_name="共模检测B",
-                required_tags={self.DeviceTags.COMMON_4MOS},
-                constraint_rules=common_detect4_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.COMMON_4MOS in roles
-            ),
-            "频率补偿": self.SubStructureType(
-                type_name="频率补偿",
-                required_tags={self.DeviceTags.COMPENSATE},
-                constraint_rules=compensate_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.COMPENSATE in roles
-            ),
-            "RC共模检测": self.SubStructureType(
-                type_name="RC共模检测",
-                required_tags={self.DeviceTags.RC_COMMON_DETECT},
-                constraint_rules=rc_common_detect_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.RC_COMMON_DETECT in roles
-            ),
-            "对称电容": self.SubStructureType(
-                type_name="对称电容",
-                required_tags={self.DeviceTags.SYM_CAPACITOR},
-                constraint_rules=sym_capacitor_constraint,
-                aggregation_rule=lambda roles: self.DeviceTags.SYM_CAPACITOR in roles
-            )
-        }
+    def get_devices_by_tag(self, tag: str) -> List['Device']:
+        """[统一接口] 获取拥有标签的器件对象"""
+        names = self.tag_index.get(tag, set())
+        return [self.circuit.devices_dict[n] for n in names if n in self.circuit.devices_dict]
 
     # -------------------------------------------------------特殊器件检测------------------------------------------------------------
     def _mark_obvious_tags(self):
         """
-        G/D连接导线相同的管子标记为二极管MOS
-        S连到电源正端的PMOS、D连到电源正端的NMOS、一端连接到电源正端的电阻存储为顶层节点（不考虑电容、电感等）
-        连接到差分输入端的管子标记为差分输入管
-        连接到共模检测端的管子标记为外侧共模管
-
+        [重构版] 基础标签识别
+        
+        逻辑保持不变：
+        1. G/D短接 -> 二极管连接 (TAG_DIODE_MOS)
+        2. 连接电源正端 -> 顶层节点 (self.top_nodes)
+        3. 栅极接输入端口 -> 差分输入管 (TAG_DIFF_POS/NEG)
+        4. 栅极接共模端口 -> 外侧共模管 (TAG_CM_OUTER)
+        
         **独立，不依赖其他函数**
         """
+        AC = self.AC  # 快捷引用
+        
         for device in self.circuit.devices_dict.values():
-            # ---------------------检测并缓存二极管连接MOS管------------------
+            # --------------------- 1. 检测二极管连接MOS管 ------------------
             if device.type in ["PMOS", "NMOS"]:
                 g_net = device.terminals.get("G")
                 d_net = device.terminals.get("D")
+                # 检查 G 和 D 是否连接到同一网络
                 if g_net and d_net and self._net_matches(g_net, {d_net}):
-                    self.add_tag(device, self.DeviceTags.DIODE_MOS)
+                    self.add_tag(device, AC.TAG_DIODE_MOS)
 
-            # -----------------------识别顶层节点-------------------------
+            # ----------------------- 2. 识别顶层节点 -------------------------
+            # 顶层节点用于生成电流路径，存储在辅助缓存 top_nodes 中
             if self._is_top_node(device):
                 self.top_nodes.append(device)
 
-            # ------------------------标记并缓存差分输入管--------------------------
+            # ------------------------ 3. 标记差分输入管 --------------------------
             if device.type in ["PMOS", "NMOS"]:
                 g_net = device.terminals.get("G")
                 if g_net:
                     if self._net_matches(g_net, self.CircuitPorts.INPUT_POSITIVE):
-                        self.add_tag(device, self.DeviceTags.DIFF_POSITIVE)
+                        self.add_tag(device, AC.TAG_DIFF_POS)
                     elif self._net_matches(g_net, self.CircuitPorts.INPUT_NEGATIVE):
-                        self.add_tag(device, self.DeviceTags.DIFF_NEGATIVE)
+                        self.add_tag(device, AC.TAG_DIFF_NEG)
 
-            # ---------------------------------标记并缓存共模检测管---------------------------------
+            # ------------------------ 4. 标记共模检测管 --------------------------
             if device.type in ["PMOS", "NMOS"]:
-                g_net = device.terminals.get("G")
+                g_net = device.terminals.get("G", "")
                 if self._net_matches(g_net, self.CircuitPorts.COMMON_SIGN):
-                    self.add_tag(device, self.DeviceTags.COMMON_OUTER)    
+                    self.add_tag(device, AC.TAG_CM_OUTER)    
 
     # ------------------------------------------------ 标记输出管/频率补偿/RC共模检测 --------------------------------------------------------
     def _mark_outport_devices(self):
@@ -1500,18 +1581,16 @@ class CircuitAnalyzer:
 
         **独立，不依赖其他函数**
         """
+        AC = self.AC
+
         # --- 辅助函数 1: 获取二端器件的另一端网络 ---
         def _get_other_terminal_net(device: 'CircuitAnalyzer.Device', connected_net: str) -> Optional[str]:
             """获取电容/电阻的另一端网络名"""
             net1 = device.terminals.get("PLUS")
             net2 = device.terminals.get("MINUS")
-            if not net1 or not net2:
-                return None
-
-            if self._net_matches(net1, {connected_net}):
-                return net2
-            elif self._net_matches(net2, {connected_net}):
-                return net1
+            if not net1 or not net2: return None
+            if self._net_matches(net1, {connected_net}): return net2
+            elif self._net_matches(net2, {connected_net}): return net1
             return None
 
         # --- 辅助函数 2: 获取网络上的MOS管与对应连接方式---
@@ -1520,27 +1599,17 @@ class CircuitAnalyzer:
             获取指定网络上所有MOS管的连接信息。
             只关心MOS管，忽略其他器件。
             """
-            if not net:
-                return []
-
+            if not net: return []
             mos_connections = []
             device_names_on_net = self.net_device_map.get(net.lower(), [])
-
             for dev_name in device_names_on_net:
-                if dev_name in exclude_devices:
-                    continue
-
+                if dev_name in exclude_devices: continue
                 dev = self.circuit.devices_dict.get(dev_name)
-                if not dev or dev.type not in ["PMOS", "NMOS"]:
-                    continue
-
-                # 判断连接类型
-                if self._net_matches(dev.terminals.get("G"), {net}):
+                if not dev or dev.type not in ["PMOS", "NMOS"]: continue
+                if self._net_matches(dev.terminals.get("G", ""), {net}):
                     mos_connections.append({'conn_type': 'G', 'device': dev})
                 else:
-                    # 假设 S 或 D 连接
                     mos_connections.append({'conn_type': 'DS', 'device': dev})
-
             return mos_connections
 
         # --- 辅助函数 3: 检查网络是否只有单个电阻 ---
@@ -1548,23 +1617,15 @@ class CircuitAnalyzer:
             """
             检查指定网络上是否 *仅* 包含一个电阻 (且无其他器件)。
             """
-            if not net:
-                return None
-
+            if not net: return None
             devices_on_net = []
             device_names_on_net = self.net_device_map.get(net.lower(), [])
-
             for dev_name in device_names_on_net:
-                if dev_name in exclude_devices:
-                    continue
+                if dev_name in exclude_devices: continue
                 dev = self.circuit.devices_dict.get(dev_name)
-                if dev:
-                    devices_on_net.append(dev)
-
-            # 严格检查：网络上除排除列表外，必须只有1个器件，且它必须是电阻
+                if dev: devices_on_net.append(dev)
             if len(devices_on_net) == 1 and devices_on_net[0].type == "Resistor":
                 return devices_on_net[0]
-
             return None
 
         # --- 核心处理逻辑 ---
@@ -1574,128 +1635,81 @@ class CircuitAnalyzer:
             """
             for dev_name in device_names:
                 device = self.circuit.devices_dict.get(dev_name)
-                if not device:
-                    continue
+                if not device: continue
 
-                # --- 规则 0: 标记并缓存 MOS 输出端管 ---
+                # --- 规则 0: MOS 输出端管 ---
                 if device.type in ["PMOS", "NMOS"]:
+                    is_s_conn = self._net_matches(device.terminals.get("S", ""), {net_name})
+                    is_d_conn = self._net_matches(device.terminals.get("D", ""), {net_name})
+                    
                     if net_name.lower() in positive_nets_lower:
-                        if self.DeviceTags.OUTPORT_POSITIVE not in device.tags and (
-                                self._net_matches(device.terminals.get("S"), {net_name}) or self._net_matches(
-                            device.terminals.get("D"), {net_name})):
-                            self.add_tag(device, self.DeviceTags.OUTPORT_POSITIVE)
+                        if AC.TAG_OUTPORT_POS not in device.tags and (is_s_conn or is_d_conn):
+                            self.add_tag(device, AC.TAG_OUTPORT_POS)
                     elif net_name.lower() in negative_nets_lower:
-                        if self.DeviceTags.OUTPORT_NEGATIVE not in device.tags and (
-                                self._net_matches(device.terminals.get("S"), {net_name}) or self._net_matches(
-                            device.terminals.get("D"), {net_name})):
-                            self.add_tag(device, self.DeviceTags.OUTPORT_NEGATIVE)
+                        if AC.TAG_OUTPORT_NEG not in device.tags and (is_s_conn or is_d_conn):
+                            self.add_tag(device, AC.TAG_OUTPORT_NEG)
 
-                # --- 规则 1: 器件是电容 ---
+                # --- 规则 1: 电容 (频率补偿/RC共模) ---
                 elif device.type == "Capacitor":
                     cap_device = device
-                    other_net = _get_other_terminal_net(cap_device, net_name)  # 输出端网络的另一端
-                    if not other_net:
-                        continue
+                    other_net = _get_other_terminal_net(cap_device, net_name)
+                    if not other_net: continue
 
                     exclude_set = {cap_device.name}
                     mos_conns = _get_net_mos_connections(other_net, exclude_set)
                     num_mos = len(mos_conns)
 
                     if num_mos > 1:
-                        # Case C1 (多MOS): 标记并缓存 COMPENSATE
-                        self.add_tag(cap_device, self.DeviceTags.COMPENSATE)
-
+                        self.add_tag(cap_device, AC.TAG_COMPENSATE)
                     elif num_mos == 1:
                         if mos_conns[0]['conn_type'] == 'G':
-                            # Case C2.1 (单MOS 栅极): 标记并缓存 RC_COMMON_DETECT
-                            self.add_tag(cap_device, self.DeviceTags.RC_COMMON_DETECT)  
+                            self.add_tag(cap_device, AC.TAG_RC_CM_DETECT)
                         else:
-                            # Case C2.2 (单MOS S/D): 标记并缓存 COMPENSATE
-                            self.add_tag(cap_device, self.DeviceTags.COMPENSATE)
-
+                            self.add_tag(cap_device, AC.TAG_COMPENSATE)
                     elif num_mos == 0:
-                        # Case C3 (无MOS, 检查串联电阻)
                         serial_res = _get_net_single_resistor(other_net, exclude_set)
                         if serial_res:
-                            # 确实是 C -> R 结构
-                            far_net = _get_other_terminal_net(serial_res, other_net)  # 电阻未与电容相连的那一端
-                            if not far_net:
-                                continue
-
+                            far_net = _get_other_terminal_net(serial_res, other_net)
+                            if not far_net: continue
                             exclude_set_far = {cap_device.name, serial_res.name}
                             mos_conns_far = _get_net_mos_connections(far_net, exclude_set_far)
-                            num_mos_far = len(mos_conns_far)
+                            
+                            if len(mos_conns_far) > 1:
+                                self.add_tag(cap_device, AC.TAG_COMPENSATE)
+                                self.add_tag(serial_res, AC.TAG_COMPENSATE)
+                            elif len(mos_conns_far) == 1:
+                                if mos_conns_far[0]['conn_type'] != 'G':
+                                    self.add_tag(cap_device, AC.TAG_COMPENSATE)
+                                    self.add_tag(serial_res, AC.TAG_COMPENSATE)
 
-                            if num_mos_far > 1:
-                                # Case C3.1 (C->R->MOS栅极与MOS两端): 标记并缓存 COMPENSATE
-                                self.add_tag(cap_device, self.DeviceTags.COMPENSATE)
-                                self.add_tag(serial_res, self.DeviceTags.COMPENSATE)
-
-                            elif num_mos_far == 1:
-                                if mos_conns_far[0]['conn_type'] == 'G':
-                                    # Case C3.2.1 (C->R->MOS 栅极): 跳过
-                                    pass
-                                else:
-                                    # Case C3.2.2 (C->R->MOS S/D): 标记并缓存 COMPENSATE
-                                    self.add_tag(cap_device, self.DeviceTags.COMPENSATE)
-                                    self.add_tag(serial_res, self.DeviceTags.COMPENSATE)
-                        # else:
-                        # Case C4 (无MOS, 也非单个电阻): 跳过
-
-                # --- 规则 2: 器件是电阻 ---
+                # --- 规则 2: 电阻 (RC共模) ---
                 elif device.type == "Resistor":
                     res1_device = device
-                    other_net = _get_other_terminal_net(res1_device, net_name)  # 未与输出端相连的那一端
-                    if not other_net:
-                        continue
+                    other_net = _get_other_terminal_net(res1_device, net_name)
+                    if not other_net: continue
 
                     exclude_set = {res1_device.name}
                     mos_conns = _get_net_mos_connections(other_net, exclude_set)
-                    num_mos = len(mos_conns)
-
-                    if num_mos > 1:
-                        # Case R1 (多MOS): 跳过
-                        pass
-
-                    elif num_mos == 1:
-                        if mos_conns[0]['conn_type'] == 'G':
-                            # Case R2.1 (单MOS 栅极): 标记并缓存 RC_COMMON_DETECT
-                            self.add_tag(res1_device, self.DeviceTags.RC_COMMON_DETECT)
-                        # else:
-                        # Case R2.2 (单MOS S/D): 跳过
-
-                    elif num_mos == 0:
-                        # Case R3 (无MOS, 检查串联电阻)
+                    
+                    if len(mos_conns) == 1 and mos_conns[0]['conn_type'] == 'G':
+                        self.add_tag(res1_device, AC.TAG_RC_CM_DETECT)
+                    elif len(mos_conns) == 0:
                         serial_res2 = _get_net_single_resistor(other_net, exclude_set)
                         if serial_res2:
-                            # 确实是 R1 -> R2 结构
-                            far_net = _get_other_terminal_net(serial_res2, other_net)  # R2中未与R1电阻相连的那一端
-                            if not far_net:
-                                continue
+                            far_net = _get_other_terminal_net(serial_res2, other_net)
+                            if not far_net: continue
+                            mos_conns_far = _get_net_mos_connections(far_net, {res1_device.name, serial_res2.name})
+                            
+                            if len(mos_conns_far) == 1 and mos_conns_far[0]['conn_type'] == 'G':
+                                self.add_tag(res1_device, AC.TAG_RC_CM_DETECT)
+                                self.add_tag(serial_res2, AC.TAG_RC_CM_DETECT)
 
-                            exclude_set_far = {res1_device.name, serial_res2.name}
-                            mos_conns_far = _get_net_mos_connections(far_net, exclude_set_far)
-                            num_mos_far = len(mos_conns_far)
-
-                            if num_mos_far == 1:
-                                if mos_conns_far[0]['conn_type'] == 'G':
-                                    # Case R3.2.1 (R1->R2->单MOS 栅极): 标记并缓存两者 RC_COMMON_DETECT
-                                    self.add_tag(res1_device, self.DeviceTags.RC_COMMON_DETECT)
-                                    self.add_tag(serial_res2, self.DeviceTags.RC_COMMON_DETECT)
-                                # else:
-                                # Case R3.1 (R1->R2->多MOS): 跳过
-                                # Case R3.2.2 (R1->R2->单MOS S/D): 跳过
-                        # else:
-                        # Case R4 (无MOS, 也非单个电阻): 跳过
-
-        # --- 主函数体 ---
-        # 1. 处理正端输出
+        # --- 主循环 ---
         positive_nets_lower = {n.lower() for n in self.CircuitPorts.OUTPORT_POSITIVE}
         for net_name_lower in positive_nets_lower:
             device_names = self.net_device_map.get(net_name_lower, [])
             _process_output_net_devices(device_names, net_name_lower)
 
-        # 2. 处理负端输出
         negative_nets_lower = {n.lower() for n in self.CircuitPorts.OUTPORT_NEGATIVE}
         for net_name_lower in negative_nets_lower:
             device_names = self.net_device_map.get(net_name_lower, [])
@@ -1712,56 +1726,72 @@ class CircuitAnalyzer:
         **依赖外侧共模管标签**
         _mark_obvious_tags() 之后调用
         """
-        if len(self.common_outer) != 2:
+        AC = self.AC
+        
+        # 1. 从 Tag Index 获取外侧管
+        outer_names = list(self.get_names_by_tag(AC.TAG_CM_OUTER))
+        
+        if len(outer_names) != 2:
             return
 
         try:
-            dev1 = self.circuit.devices_dict[self.common_outer[0]]
-            dev2 = self.circuit.devices_dict[self.common_outer[1]]
+            dev1 = self.circuit.devices_dict[outer_names[0]]
+            dev2 = self.circuit.devices_dict[outer_names[1]]
 
             s_net1 = dev1.terminals.get("S")
             s_net2 = dev2.terminals.get("S")
+            
             # 检查源极是否连接到同一个网络
             if not s_net1 or s_net1 != s_net2:
                 return
+                
             common_s_net = s_net1
+            
             # 查找连接到此共源极的所有器件
             all_devs_on_net = self.net_device_map.get(common_s_net.lower(), [])
 
-            other_dev_names = [
-                name for name in all_devs_on_net
-                if name not in self.common_outer
-            ]
+            # 筛选出其他的 MOS 管
             other_mos_devices = []
-            for name in other_dev_names:
+            for name in all_devs_on_net:
+                if name in outer_names:
+                    continue
+                    
                 dev = self.circuit.devices_dict.get(name)
-                if dev and dev.type in ["PMOS", "NMOS"] and self._net_matches(dev.terminals.get("S"), {common_s_net}):
+                # 检查是否为 MOS 且源极连接到共源点 (排除漏极连接的情况)
+                if dev and dev.type in ["PMOS", "NMOS"] and self._net_matches(dev.terminals.get("S", ""), {common_s_net}):
                     other_mos_devices.append(dev)
 
-            # 检查是否 *恰好* 连接另外两个MOS管
+            # 检查是否 *恰好* 存在另外两个MOS管 (构成4管结构)
             if len(other_mos_devices) == 2:
                 all_four_devices = [dev1, dev2] + other_mos_devices
 
-                # 标记并缓存输出管
-                self.add_tag(other_mos_devices[0], self.DeviceTags.COMMON_INNER)
-                self.add_tag(other_mos_devices[1], self.DeviceTags.COMMON_INNER)
-                # 标记并缓存4管共模检测结构
+                # 标记内侧管
+                self.add_tag(other_mos_devices[0], AC.TAG_CM_INNER)
+                self.add_tag(other_mos_devices[1], AC.TAG_CM_INNER)
+                
+                # 标记所有成员为 4管共模检测成员
                 for dev in all_four_devices:
-                    self.add_tag(dev, self.DeviceTags.COMMON_4MOS)
-                # print(f"信息：识别到B型共模检测结构，成员: {[d.name for d in all_four_devices]}")
+                    self.add_tag(dev, AC.TAG_CM_4MOS)
+                    
+                # print(f"[Info] 识别到B型共模检测结构: {[d.name for d in all_four_devices]}")
 
         except KeyError:
-            print("器件名称不在 self.circuit.devices_dict 中，忽略")
+            print("[Error] 共模检测识别中发现未登记的器件名称")
             pass
 
     ##########################################级联与普通电流镜标记#########################################################
-    ##################################################################################################################
     def _analyze_diode_mos_structures(self):
         """
+        [重构版] 二极管结构分析
+        
+        逻辑：
+        1. 找到所有二极管连接的 MOS (Master)。
+        2. 找到所有栅极连接到 Master 的其他 MOS (Slaves)。
+        3. 区分 Slaves 是“级联从管”还是“镜像管”。
+        
         **依赖二极管连接标签**
         _mark_obvious_tags() 之后调用
         """
-
         groups = self._find_slave_mos_and_form_groups()
         for group in groups:
             self._mark_cascode_roles(group)
@@ -1769,33 +1799,31 @@ class CircuitAnalyzer:
 
     def _find_slave_mos_and_form_groups(self) -> List[Dict]:
         """
-        查找所有二极管连接的MOS管(master)及其栅极连接的从MOS管(slaves)，
+        辅助函数：查找 Master-Slave 组
         """
+        AC = self.AC
         groups = []
-        masters = [
-            device for device in self.circuit.devices_dict.values()
-            if self.DeviceTags.DIODE_MOS in device.tags
-        ]
+        # 使用 Tag Index 获取二极管
+        masters_names = self.get_names_by_tag(AC.TAG_DIODE_MOS)
+        
+        for master_name in masters_names:
+            master = self.circuit.devices_dict.get(master_name)
+            if not master: continue
 
-        for master in masters:
             g_net = master.terminals.get("G")
-            if not g_net:
-                continue
+            if not g_net: continue
 
             slave_names = self.net_device_map.get(g_net.lower(), [])
             slaves = []
             for name in slave_names:
-                if name == master.name:
-                    continue
+                if name == master.name: continue # 跳过自己
 
                 device = self.circuit.devices_dict.get(name)
+                if not device: continue
+                if device.type not in ["PMOS", "NMOS"]: continue
 
-                if not device:
-                    continue
-                if device.type not in ["PMOS", "NMOS"]:
-                    continue
-
-                if self._net_matches(device.terminals.get("G"), {g_net}):
+                # 确认栅极确实连接
+                if self._net_matches(device.terminals.get("G", ""), {g_net}):
                     slaves.append(device)
 
             groups.append({"master": master, "slaves": slaves, "g_net": g_net})
@@ -1803,132 +1831,143 @@ class CircuitAnalyzer:
         return groups
 
     def _mark_cascode_roles(self, group: Dict):
+        """
+        辅助函数：标记级联关系 (Master -> Source connected Slave)
+        """
+        AC = self.AC
         master = group["master"]
-        slaves = group["slaves"].copy()  # 实际是要对Device修改的，用浅copy是对的，深copy是错的
+        slaves = group["slaves"] # 注意：这是引用，列表内容会被修改
+        
         current_s_net = master.terminals.get("S")
         cascode_slaves = []
 
+        # 迭代查找级联链 (Master.S -> Slave1.D, Slave1.S -> Slave2.D ...)
         while slaves:
+            # 在 slaves 中查找 D 端连接到 current_s_net 的管子
             found = next(
-                (s for s in slaves if s.terminals.get("D") == current_s_net),
+                (s for s in slaves if self._net_matches(s.terminals.get("D"), {current_s_net})),
                 None
             )
             if not found:
                 break
-            self.add_tag(found, self.DeviceTags.CASCODE_SLAVE)
+                
+            # 标记
+            self.add_tag(found, AC.TAG_CASCODE_SLAVE)
             cascode_slaves.append(found)
+            
+            # 更新搜索节点
             current_s_net = found.terminals.get("S")
-            slaves.remove(found)
+            slaves.remove(found) # 从候选列表中移除，剩下的就是镜像管
 
         if cascode_slaves:
-            self.add_tag(master, self.DeviceTags.CASCODE_MAIN)
+            self.add_tag(master, AC.TAG_CASCODE_MAIN)
             for slave in cascode_slaves:
-                self.add_relation(master.name, "cascode_slave", slave.name)
-            # 还有一些别的子结构也可以在此阶段登记，而这里的登记也可以放到后面，没有统一登记只是懒得改而已
-            self.aggregate_substructure("级联", [master] + cascode_slaves, f"cascode_{master.name}")
+                # [Relation] 记录级联关系
+                self.add_relation(master.name, AC.REL_CASCODE_M2S, slave.name)
+            
+            # 登记子结构实例 (保持原有逻辑，这里可以登记)
+            self.aggregate_substructure(AC.STR_CASCODE, [master] + cascode_slaves)
 
     def _mark_current_mirror_roles(self, group: Dict):
+        """
+        辅助函数：标记普通电流镜关系 (剩余的 Slaves)
+        """
+        AC = self.AC
         master = group["master"]
-        remaining_slaves = [s for s in group["slaves"] if self.DeviceTags.CASCODE_SLAVE not in s.tags]
+        # 排除已经被标记为级联从管的 (虽然 _mark_cascode_roles 已经 remove 了，但双重保险)
+        remaining_slaves = [s for s in group["slaves"] if AC.TAG_CASCODE_SLAVE not in s.tags]
+        
         if not remaining_slaves:
             return
-        self.add_tag(master, self.DeviceTags.CURRENT_MIRROR_REF)
-        for slave in remaining_slaves:
-            self.add_tag(slave, self.DeviceTags.CURRENT_MIRROR_MIRROR)
 
-        self.add_relation(master.name, "current_mirror_mirror", slave.name)
+        self.add_tag(master, AC.TAG_STD_MIRROR_REF)
+        
+        for slave in remaining_slaves:
+            self.add_tag(slave, AC.TAG_STD_MIRROR_MIRROR)
+            # [Relation] 记录普通电流镜关系
+            self.add_relation(master.name, AC.REL_STD_REF2MIRROR, slave.name)
+        
+        # 子结构登记推迟到 _register_current_mirrors 统一处理
 
     ##################################################################################################################
     ##################################################################################################################
     # -----------------------------------------根参考管标记-------------------------------------------------
     def _mark_root_reference_path(self):
         """
-        根据电流源端口(如IREF/IIN)查找“电流源路径”。
-        并为该路径上所有普通电流镜参考管打上ROOT_REF标签。
-
-        注意：假设电流源路径为电流源端口-普通电流镜参考管-（普通电流镜参考管）-电源负端；假设电流源端口到电源负端间只有一条电流路径，且此路径上只包含普通电流镜参考管
-
-        这里存在逻辑冗余
+        [重构版] 根参考管标记
+        
+        逻辑：
+        从 IREF/IIN 端口出发，沿着二极管连接的 MOS 链向下查找，直到电源负端。
+        路径上的所有 TAG_STD_MIRROR_REF 被追加标记为 TAG_ROOT_REF。
+        
         **依赖普通电流镜参考管标签**
         _analyze_diode_mos_structures() 之后
         """
-        # 1. 查找起始网络
+        AC = self.AC
+        
+        # 1. 查找起始网络 (IREF/IIN)
         start_net = None
         start_net_device_names = []
-
-        # 使用 .lower() 匹配 net_device_map 的键
         current_source_lower = {s.lower() for s in self.CircuitPorts.CURRENT_SOURCE}
 
         for net_key in self.net_device_map.keys():
             if net_key in current_source_lower:
                 start_net = net_key
                 start_net_device_names = self.net_device_map[net_key]
-                break  # 假设只有一个匹配的网络
+                break 
 
         if not start_net:
-            raise ValueError("信息：未找到电流源路径起始点 (IREF/IIN)，需扩展电流源网络名称或检查电路设计。")
-            # return  # 未找到起始网络，正常退出
+            # print("信息：未找到电流源路径起始点 (IREF/IIN)。")
+            return
 
-        # 2. 查找起始器件
-        # 路径的起始点必须是唯一的二极管连接的参考管（不然会把镜像管也错误标记成根参考管）
+        # 2. 查找起始器件 (必须是二极管连接的参考管)
         start_candidates = []
         for dev_name in start_net_device_names:
             dev = self.circuit.devices_dict.get(dev_name)
-            if dev and (self.DeviceTags.DIODE_MOS in dev.tags and
-                        self.DeviceTags.CURRENT_MIRROR_REF in dev.tags):
+            # 检查 Tag Index 也可以，这里直接查对象 Tag
+            if dev and (AC.TAG_DIODE_MOS in dev.tags and AC.TAG_STD_MIRROR_REF in dev.tags):
                 start_candidates.append(dev)
 
-        # 根据约束，这条路径的起点必须是唯一的
         if len(start_candidates) != 1:
-            raise ValueError(f"警告：电流源网络 '{start_net}' 未找到或找到多个 (>=1) 根参考管。")
+            # print(f"警告：电流源网络 '{start_net}' 未找到唯一根参考管 (找到 {len(start_candidates)} 个)。")
+            return
 
         current_device = start_candidates[0]
 
-        # 3. 循环遍历路径，直到负电源
+        # 3. 循环遍历路径
         while current_device:
-            # 检查约束 (理论上已在查找时满足，但双重检查)
-            if not (self.DeviceTags.DIODE_MOS in current_device.tags and
-                    self.DeviceTags.CURRENT_MIRROR_REF in current_device.tags):
-                break  # 路径中断，不满足约束
+            # 再次校验
+            if not (AC.TAG_DIODE_MOS in current_device.tags and AC.TAG_STD_MIRROR_REF in current_device.tags):
+                break
 
             # 标记为根参考管
-            self.add_tag(current_device, self.DeviceTags.ROOT_REF)
+            self.add_tag(current_device, AC.TAG_ROOT_REF)
 
-            # 4. 根据类型查找下一个网络节点
+            # 4. 寻找下一级网络
             next_net = None
             if current_device.type == "NMOS":
-                # NMOS 向下查找源极 S
                 next_net = current_device.terminals.get("S")
             elif current_device.type == "PMOS":
-                # PMOS 向下查找漏极 D
                 next_net = current_device.terminals.get("D")
-            else:
-                raise ValueError(f"警告：电流源网络 '{start_net}' 只应该包含MOS管。")
+            
+            if not next_net or self._is_net_ground(next_net):
+                break 
 
-            # 5. 检查是否到达终止条件 (电源负端)
-            if not next_net or self._net_matches(next_net, self.CircuitPorts.POWER_NEGATIVE):
-                # print(f"信息：电流源路径在 {current_device.name} 处到达负电源。")
-                break  # 路径结束
-
-            # 6. 查找下一个器件
+            # 5. 寻找下一级器件
             next_net_device_names = self.net_device_map.get(next_net.lower(), [])
-
             candidates = []
             for dev_name in next_net_device_names:
-                if dev_name == current_device.name:
-                    continue  # 跳过自己
+                if dev_name == current_device.name: continue
 
                 dev = self.circuit.devices_dict.get(dev_name)
-                # 路径上的下一个器件也必须是二极管连接的参考管
-                if dev and (self.DeviceTags.DIODE_MOS in dev.tags and
-                            self.DeviceTags.CURRENT_MIRROR_REF in dev.tags):
+                if dev and (AC.TAG_DIODE_MOS in dev.tags and AC.TAG_STD_MIRROR_REF in dev.tags):
                     candidates.append(dev)
 
-            # 路径必须是单向且唯一的
             if len(candidates) == 1:
-                current_device = candidates[0]  # 找到了，继续循环
+                current_device = candidates[0]
             else:
-                raise ValueError(f"警告：电流源网络 '{start_net}' 存在至少{len(candidates)}条电流源路径。")
+                # 分叉或中断，停止搜索
+                break
 
     #################################################低压电流镜标记######################################################
     ##################################################################################################################
@@ -1943,11 +1982,12 @@ class CircuitAnalyzer:
         _mark_obvious_tags() 之后
         _analyze_diode_mos_structures之后
         """
+        AC = self.AC
         mos_devices = [d for d in self.circuit.devices_dict.values() if d.type in ["PMOS", "NMOS"]]
         processed_mos = set()
 
-        # 预构建栅极网络,MOS管映射
-        gate_net_map: DefaultDict[str, Set['CircuitAnalyzer.Device']] = defaultdict(set)  #
+        # 预构建栅极映射加速查找
+        gate_net_map: DefaultDict[str, Set['CircuitAnalyzer.Device']] = defaultdict(set)
         for mos in mos_devices:
             g_net = mos.terminals.get("G")
             if g_net:
@@ -1955,56 +1995,45 @@ class CircuitAnalyzer:
 
         for a in mos_devices:
             a_name = a.name
-            if a_name in processed_mos:
-                continue
+            if a_name in processed_mos: continue
 
             a_g = a.terminals.get("G")
             a_d = a.terminals.get("D")
             a_s = a.terminals.get("S")
-            if not (a_g and a_d and a_s):
-                continue
+            if not (a_g and a_d and a_s): continue
 
-            # 优化：通过网络映射快速查找潜在匹配的B管
+            # 优化：只检查连接到 A.D 或 A.G 的器件
             candidate_b_names = set()
-            # 情况1相关管子:B的G连A的D,查找连接A的D网络的器件
-            if a_d:
-                candidate_b_names.update(self.net_device_map.get(a_d.lower(), []))
-            # 情况2相关管子:B的D连A的G,查找连接A的G网络的器件
-            if a_g:
-                candidate_b_names.update(self.net_device_map.get(a_g.lower(), []))
+            if a_d: candidate_b_names.update(self.net_device_map.get(a_d.lower(), []))
+            if a_g: candidate_b_names.update(self.net_device_map.get(a_g.lower(), []))
 
-            # 仅遍历候选B管,减少循环次数
             for b_name in candidate_b_names:
-                if b_name == a_name or b_name in processed_mos:
-                    continue
+                if b_name == a_name or b_name in processed_mos: continue
+                
                 b = self.circuit.devices_dict.get(b_name)
-                if not b or b.type not in ["PMOS", "NMOS"]:
-                    continue
+                if not b or b.type not in ["PMOS", "NMOS"]: continue
 
                 b_g = b.terminals.get("G")
                 b_d = b.terminals.get("D")
                 b_s = b.terminals.get("S")
-                if not (b_g and b_d and b_s):
-                    continue
+                if not (b_g and b_d and b_s): continue
 
-                # 情况1：B的G连A的D，B的D连A的S
-                if self._net_matches(b_g, {a_d}) and self._net_matches(b_d, {a_s}) and not self._net_matches(b_g,
-                                                                                                             {a_g}):
-                    self.add_tag(a,self.DeviceTags.LV_MIRROR_UPPER_REF)
-                    self.add_tag(b,self.DeviceTags.LV_MIRROR_LOWER_REF)
+                # Case 1: B.G=A.D, B.D=A.S (且非自馈 B.G!=A.G) -> A=Upper, B=Lower
+                if self._net_matches(b_g, {a_d}) and self._net_matches(b_d, {a_s}) and not self._net_matches(b_g, {a_g}):
+                    self.add_tag(a, AC.TAG_LV_UPPER_REF)
+                    self.add_tag(b, AC.TAG_LV_LOWER_REF)
                     processed_mos.add(a_name)
                     processed_mos.add(b_name)
-                    self._mark_low_voltage_mirrors(a, b, gate_net_map)  # 传入预构建的映射
+                    self._mark_low_voltage_mirrors(a, b, gate_net_map)
                     break
 
-                # 情况2：B的D连A的G，B的S连A的D
-                if self._net_matches(b_d, {a_g}) and self._net_matches(b_s, {a_d}) and not self._net_matches(b_g,
-                                                                                                             {a_g}):
-                    self.add_tag(b,self.DeviceTags.LV_MIRROR_UPPER_REF)
-                    self.add_tag(a,self.DeviceTags.LV_MIRROR_LOWER_REF)
+                # Case 2: B.D=A.G, B.S=A.D -> B=Upper, A=Lower
+                if self._net_matches(b_d, {a_g}) and self._net_matches(b_s, {a_d}) and not self._net_matches(b_g, {a_g}):
+                    self.add_tag(b, AC.TAG_LV_UPPER_REF)
+                    self.add_tag(a, AC.TAG_LV_LOWER_REF)
                     processed_mos.add(a_name)
                     processed_mos.add(b_name)
-                    self._mark_low_voltage_mirrors(b, a, gate_net_map)  # 传入预构建的映射
+                    self._mark_low_voltage_mirrors(b, a, gate_net_map)
                     break
 
     #################################################低压电流镜标记######################################################
@@ -2014,84 +2043,78 @@ class CircuitAnalyzer:
         """
         标记低压电流镜的镜像管
         """
+        AC = self.AC
         upper_ref_g = upper_ref.terminals["G"]
         lower_ref_g = lower_ref.terminals["G"]
 
         upper_bias = None
         upper_mirrors_list = []
 
-        # 情况 (1): "耦合" 上层管是镜像管
-        if self.DeviceTags.CURRENT_MIRROR_MIRROR in upper_ref.tags:  #
-            # 查找与上层管在同一栅极的二极偏置管
+        # 1. 检查上层是否“耦合”了普通电流镜结构 (即 UpperRef 本身是某个 Diode 的镜像)
+        # 这通常意味着存在一个 Diode connected MOS 提供偏置
+        if AC.TAG_STD_MIRROR_MIRROR in upper_ref.tags:
             devices_on_gate = gate_net_map.get(upper_ref_g.lower(), set())
-            diode_mos_list = [d for d in devices_on_gate if self.DeviceTags.DIODE_MOS in d.tags]  #
+            diode_mos_list = [d for d in devices_on_gate if AC.TAG_DIODE_MOS in d.tags]
 
             if diode_mos_list:
-                upper_bias = diode_mos_list[0]  # 假设只有一个偏置管
-                self.add_tag(upper_bias, self.DeviceTags.LV_MIRROR_UPPER_BIAS)  # 赋予偏置标签 #
+                upper_bias = diode_mos_list[0]
+                self.add_tag(upper_bias, AC.TAG_LV_UPPER_BIAS)
             else:
-                # 严重错误：上层参考管应该有偏置管，但没找到
-                print(f"警告：LV结构 {upper_ref.name} 缺少二极管偏置管，无法登记。")
-                return
+                print(f"[Warning] LV Ref {upper_ref.name} 有镜像标签但无 Diode 偏置。")
+                # 这种情况可能需要降级处理或报错，保持原逻辑继续执行
 
-        # 3. 标记上层镜像管 (基于upper_ref)
-        all_upper_devices_on_gate = gate_net_map.get(upper_ref_g.lower(), set())
+        # 2. 标记上层镜像管 (Upper Mirrors)
+        all_upper_on_gate = gate_net_map.get(upper_ref_g.lower(), set())
+        for mos in all_upper_on_gate:
+            if mos.name == upper_ref.name: continue
+            if upper_bias and mos.name == upper_bias.name: continue
 
-        for mos in all_upper_devices_on_gate:
-            # 排除参考管与偏置二极管
-            if mos.name == upper_bias.name or mos.name == upper_ref.name:
-                continue
-
-            self.add_tag(mos, self.DeviceTags.LV_MIRROR_UPPER_MIRROR)
+            self.add_tag(mos, AC.TAG_LV_UPPER_MIRROR)
             upper_mirrors_list.append(mos)
 
-        # 4. 标记下层镜像管 (基于 lower_ref)
-        all_lower_devices_on_gate = gate_net_map.get(lower_ref_g.lower(), set())
+        # 3. 标记下层镜像管 (Lower Mirrors)
+        all_lower_on_gate = gate_net_map.get(lower_ref_g.lower(), set())
         lower_mirrors_list = []
-
-        for mos in all_lower_devices_on_gate:
-            if mos.name == lower_ref.name:
-                continue
-
-            self.add_tag(mos, self.DeviceTags.LV_MIRROR_LOWER_MIRROR)
+        for mos in all_lower_on_gate:
+            if mos.name == lower_ref.name: continue
+            
+            self.add_tag(mos, AC.TAG_LV_LOWER_MIRROR)
             lower_mirrors_list.append(mos)
 
-        if upper_mirrors_list and lower_mirrors_list:  # 上下都一定要有镜像管
-            # --- 净化逻辑 (Purge Logic) ---
+        if upper_mirrors_list and lower_mirrors_list:
+            # --- 净化逻辑 (Purge) ---
+            # 如果 UpperBias 之前被识别为普通电流镜参考管，现在它属于 LV 结构的一部分，
+            # 我们需要移除它与镜像管（现在是 LV 上层镜像管）之间的普通电流镜关系，
+            # 避免双重约束冲突。
             if upper_bias:
-                # 检查该偏置管是否有“普通电流镜”关系
-                existing_mirrors = self.get_relations(upper_bias.name, "current_mirror_mirror")
+                # 检查并清理 upper_bias 作为 REF 的关系
+                # 注意：我们之前存的是 REL_STD_REF2MIRROR
+                old_mirrors = self.get_relations(upper_bias.name, AC.REL_STD_REF2MIRROR)
                 
-                if existing_mirrors:
-                    print(f"  [净化]: 检测到LV耦合，正在净化 {upper_bias.name} 及其普通电流镜关系...")
-
-                    # 1. 清除镜像管的旧标签
-                    for m_name in existing_mirrors:
-                        self.remove_tag(m_name, self.DeviceTags.CURRENT_MIRROR_MIRROR)
+                if old_mirrors:
+                    # print(f"  [净化] 清除 {upper_bias.name} 的普通电流镜关系，归入 LV 结构...")
                     
-                    # 2. 清除参考管的旧标签
-                    self.remove_tag(upper_bias, self.DeviceTags.CURRENT_MIRROR_REF)
+                    # 1. 移除镜像管的 STD 标签
+                    for m_name in old_mirrors:
+                        self.remove_tag(m_name, AC.TAG_STD_MIRROR_MIRROR)
                     
-                    # 3. 清除关系 (从图中移除该 key)
-                    # 这是一个 defaultdict，可以直接 pop 或 set empty
-                    if "current_mirror_mirror" in self.relation_gragh[upper_bias.name]:
-                         del self.relation_gragh[upper_bias.name]["current_mirror_mirror"]
+                    # 2. 移除自己的 STD REF 标签
+                    self.remove_tag(upper_bias, AC.TAG_STD_MIRROR_REF)
+                    
+                    # 3. 从关系图中彻底删除该条目
+                    if AC.REL_STD_REF2MIRROR in self.relation_graph[upper_bias.name]:
+                        del self.relation_graph[upper_bias.name][AC.REL_STD_REF2MIRROR]
 
-            # --- 存储 LV 结构关系 ---
-            # 以 lower_ref 为核心节点建立星型关系
+            # --- 建立 LV 关系 (以 Lower Ref 为锚点) ---
+            self.add_relation(lower_ref.name, AC.REL_LV_LREF2UREF, upper_ref.name)
             
-            # 1. 记录上层参考管
-            self.add_relation(lower_ref.name, "lv_upper_ref", upper_ref.name)
-            
-            # 2. 记录上层偏置管 (如果有)
             if upper_bias:
-                self.add_relation(lower_ref.name, "lv_upper_bias", upper_bias.name)
+                self.add_relation(lower_ref.name, AC.REL_LV_LREF2UBIAS, upper_bias.name)
             
-            # 3. 记录所有镜像管 (Token) - 无论上层还是下层，都挂在 lower_ref 下
-            # 这方便 _register_lv_mirrors 统一获取
-            all_mirrors = upper_mirrors_list + lower_mirrors_list
-            for m in all_mirrors:
-                self.add_relation(lower_ref.name, "lv_mirror_token", m.name)
+            # 将所有 Token (上层+下层镜像管) 挂载到 Lower Ref
+            all_tokens = upper_mirrors_list + lower_mirrors_list
+            for m in all_tokens:
+                self.add_relation(lower_ref.name, AC.REL_LV_LREF2TOKEN, m.name)
 
     # -----------------------------------------------------电流路径生成-----------------------------------------------------------
     def generate_current_paths(self):
@@ -2108,7 +2131,7 @@ class CircuitAnalyzer:
         all_paths: List[List[str]] = []
 
         # 内部 DFS 函数
-        def dfs(current_dev: 'CircuitAnalyzer.Device', current_path: List[str], incoming_net: str = None):
+        def dfs(current_dev: 'CircuitAnalyzer.Device', current_path: List[str], incoming_net: str = ""):
             # 1. 环路检测
             if current_dev.name in current_path[::2]:
                 return
@@ -2148,10 +2171,11 @@ class CircuitAnalyzer:
             if node.type == "Resistor":
                 power_net = next((net for net in node.terminals.values() if self._is_net_power(net)), None)
                 # 顶层电阻视为父节点是 POWER
-                if not self._check_resistor_validity(node, power_net, "POWER"):
-                    continue 
+                if power_net:
+                    if not self._check_resistor_validity(node, power_net, "POWER"):
+                        continue 
 
-            dfs(node, [], incoming_net=None)
+            dfs(node, [], incoming_net="")
 
         self.circuit.current_paths = all_paths
         print(f"信息: 生成了 {len(all_paths)} 条电流路径。")
@@ -2185,7 +2209,7 @@ class CircuitAnalyzer:
             # --- Case 1: 下一级是 NMOS ---
             if dev.type == "NMOS":
                 # 无论父节点是 PMOS/NMOS/Res，下一级 NMOS 必须漏极 (D) 输入
-                if self._net_matches(dev.terminals.get("D"), {net_name}):
+                if self._net_matches(dev.terminals.get("D", ""), {net_name}):
                     is_valid = True
             
             # --- Case 2: 下一级是 PMOS ---
@@ -2196,7 +2220,7 @@ class CircuitAnalyzer:
                 else:
                     # 父节点是 PMOS 或 Resistor(且经过校验)
                     # PMOS 必须源极 (S) 输入 (例如 Cascode)
-                    if self._net_matches(dev.terminals.get("S"), {net_name}):
+                    if self._net_matches(dev.terminals.get("S",""), {net_name}):
                         is_valid = True
             
             # --- Case 3: 下一级是 Resistor ---
@@ -2233,52 +2257,38 @@ class CircuitAnalyzer:
 
         # 3. 检查 Target Net 上的器件
         devices_on_target = self.net_device_map.get(target_net.lower(), [])
-        has_valid_connection = False
 
         for name in devices_on_target:
             if name == resistor.name: continue
             target_dev = self.circuit.devices_dict.get(name)
             if not target_dev: continue
 
-            # --- 规则 A: POWER -> Res ---
-            if parent_type == "POWER":
-                # 允许: NMOS(D) 或 PMOS(S)
-                if target_dev.type == "NMOS" and self._net_matches(target_dev.terminals.get("D"), {target_net}):
-                    has_valid_connection = True
-                elif target_dev.type == "PMOS" and self._net_matches(target_dev.terminals.get("S"), {target_net}):
-                    has_valid_connection = True
-
-            # --- 规则 B: NMOS -> Res ---
-            elif parent_type == "NMOS":
-                # [修正逻辑]: 严格限制，只允许 NMOS(D)，禁止 PMOS
-                if target_dev.type == "NMOS" and self._net_matches(target_dev.terminals.get("D"), {target_net}):
-                    has_valid_connection = True
-                # PMOS 在此情况不被允许，不做任何操作
-
-            # --- 规则 C: PMOS -> Res ---
-            elif parent_type == "PMOS":
-                # 允许: NMOS(D) 或 PMOS(S)
-                if target_dev.type == "NMOS" and self._net_matches(target_dev.terminals.get("D"), {target_net}):
-                    has_valid_connection = True
-                elif target_dev.type == "PMOS" and self._net_matches(target_dev.terminals.get("S"), {target_net}):
-                    has_valid_connection = True
+            # 规则：如果上级是 NMOS，下级只能是 NMOS(D) 或 GND，绝不能是 PMOS
+            if parent_type == "NMOS":
+                if target_dev.type == "NMOS" and self._net_matches(target_dev.terminals.get("D", ""), {target_net}):
+                    return True
+                # PMOS is invalid here
             
-            if has_valid_connection:
-                break
-
-        return has_valid_connection
+            # 规则：如果上级是 PMOS/POWER，下级可以是 NMOS(D) 或 PMOS(S)
+            else: 
+                if target_dev.type == "NMOS" and self._net_matches(target_dev.terminals.get("D", ""), {target_net}):
+                    return True
+                elif target_dev.type == "PMOS" and self._net_matches(target_dev.terminals.get("S", ""), {target_net}):
+                    return True
+            
+        return False
 
     # ------------------------------
     # 辅助方法：获取器件流出网络
     # ------------------------------
-    def _get_device_output_net(self, device: 'CircuitAnalyzer.Device', incoming_net: str = None) -> Optional[str]:
+    def _get_device_output_net(self, device: 'CircuitAnalyzer.Device', incoming_net: str = "") -> Optional[str]:
         if device.type == "NMOS":
             return device.terminals.get("S")
         elif device.type == "PMOS":
             return device.terminals.get("D")
         elif device.type == "Resistor":
-            net1 = device.terminals.get("PLUS")
-            net2 = device.terminals.get("MINUS")
+            net1 = device.terminals.get("PLUS", "")
+            net2 = device.terminals.get("MINUS", "")
             if incoming_net:
                 if self._net_matches(net1, {incoming_net}): return net2
                 if self._net_matches(net2, {incoming_net}): return net1
@@ -2288,15 +2298,6 @@ class CircuitAnalyzer:
                 if is_net1_pwr: return net2
                 if is_net2_pwr: return net1
         return None
-
-    # ------------------------------
-    # 辅助方法：电源检测
-    # ------------------------------
-    def _is_net_power(self, net_name: str) -> bool:
-        return self._net_matches(net_name, self.CircuitPorts.POWER_POSITIVE)
-    
-    def _is_net_ground(self, net_name: str) -> bool:
-        return self._net_matches(net_name, self.CircuitPorts.POWER_NEGATIVE)
 
     # --------------------------------------------------电流束生成、电流束路径生成、电流束网络生成、电流束管标记---------------------------------------------------
     def analyze_current_beams(self):
@@ -2318,6 +2319,8 @@ class CircuitAnalyzer:
         _mark_common_mode_detect_b() 之后
         generate_current_paths() 之后
         """
+        AC = self.AC
+
         # 0. 确保电流路径已生成
         if not self.circuit.current_paths:
             print("警告：电流路径未生成，请先调用 generate_current_paths()")
@@ -2331,13 +2334,14 @@ class CircuitAnalyzer:
         # 规则 1: 4管共模检测 (优先级最高)
         # =====================================================
         # 获取所有标记为 COMMON_4MOS 的器件名称
-        beamb_devices = self.get_names_by_tag(self.DeviceTags.COMMON_4MOS)
+        cmfb_devices = self.get_names_by_tag(AC.TAG_CM_4MOS)
         beam1_paths: Set[tuple] = set()
 
-        if beamb_devices:
+        if cmfb_devices:
             for path in remaining_paths:
-                path_devs = path[::2]  # 提取器件
-                if any(device_name in beamb_devices for device_name in path_devs):
+                path_devs = path[::2]
+                # 只要路径中包含任意一个 CMFB 器件，该路径即归属 CMFB 束
+                if any(d in cmfb_devices for d in path_devs):
                     beam1_paths.add(path)
 
         if beam1_paths:
@@ -2347,15 +2351,15 @@ class CircuitAnalyzer:
         # =====================================================
         # 规则 2: 差分输入对
         # =====================================================
-        diff_pos = self.get_names_by_tag(self.DeviceTags.DIFF_POSITIVE)
-        diff_neg = self.get_names_by_tag(self.DeviceTags.DIFF_NEGATIVE)
+        diff_pos = self.get_names_by_tag(AC.TAG_DIFF_POS)
+        diff_neg = self.get_names_by_tag(AC.TAG_DIFF_NEG)
         beam2_devices = diff_pos | diff_neg
         beam2_paths: Set[tuple] = set()
 
         if beam2_devices:
             for path in remaining_paths:
                 path_devs = path[::2]
-                if any(device_name in beam2_devices for device_name in path_devs):
+                if any(d in beam2_devices for d in path_devs):
                     beam2_paths.add(path)
 
         if beam2_paths:
@@ -2365,8 +2369,8 @@ class CircuitAnalyzer:
         # =====================================================
         # 规则 3: 输出端管
         # =====================================================
-        out_pos = self.get_names_by_tag(self.DeviceTags.OUTPORT_POSITIVE)
-        out_neg = self.get_names_by_tag(self.DeviceTags.OUTPORT_NEGATIVE)
+        out_pos = self.get_names_by_tag(AC.TAG_OUTPORT_POS)
+        out_neg = self.get_names_by_tag(AC.TAG_OUTPORT_NEG)
         beam3_devices = out_pos | out_neg
         beam3_paths: Set[tuple] = set()
 
@@ -2520,7 +2524,7 @@ class CircuitAnalyzer:
                         index_set.add(dev_name)
                         
                         # [Refactor] 使用标准接口打标签
-                        self.add_tag(dev_name, self.DeviceTags.IN_CURRENT_BEAM)
+                        self.add_tag(dev_name, AC.TAG_IN_CURRENT_BEAM)
                 
                 current_beam_path.append(index_set)
 
@@ -2542,52 +2546,57 @@ class CircuitAnalyzer:
         _detect_low_voltage_current_mirrors之后
         analyze_current_beams之后
         """
+        AC = self.AC
         # --- 1. 处理普通电流镜 ---
         # 获取所有普通电流镜参考管
-        ref_names = self.get_names_by_tag(self.DeviceTags.CURRENT_MIRROR_REF)
+        ref_names = self.get_names_by_tag(AC.TAG_STD_MIRROR_REF)
         
         for ref_name in ref_names:
             ref_dev = self.circuit.devices_dict.get(ref_name)
             if not ref_dev: continue
 
-            # Case 2: Ref 在电流束中，跳过
-            if self.DeviceTags.IN_CURRENT_BEAM in ref_dev.tags:
+            # 如果参考管在电流束中 (即主信号通路)，跳过
+            if AC.TAG_IN_CURRENT_BEAM in ref_dev.tags:
                 continue
 
-            # Case 1 & 3: Ref 不在电流束中
             # 获取所有镜像管
-            mirror_names = self.get_relations(ref_name, "current_mirror_mirror")
+            mirrors = self.get_relations(ref_name, AC.REL_STD_REF2MIRROR)
+            is_root = AC.TAG_ROOT_REF in ref_dev.tags
             
-            for m_name in mirror_names:
+            for m_name in mirrors:
                 m_dev = self.circuit.devices_dict.get(m_name)
-                # 如果镜像管 *不* 在电流束中，标记为 BIAS
-                if m_dev and self.DeviceTags.IN_CURRENT_BEAM not in m_dev.tags:
-                    self.add_tag(m_dev, self.DeviceTags.CURRENT_MIRROR_BIAS_MIRROR)
+                if not m_dev: continue
+
+                # 如果镜像管也不在电流束中 -> 确认为偏置用途
+                if AC.TAG_IN_CURRENT_BEAM not in m_dev.tags:
+                    self.add_tag(m_dev, AC.TAG_STD_MIRROR_BIAS)
                     
-                    # 如果是根参考管，记录特殊的 "root_bias_mirror" 关系 (替代原 self.root_bias_mirror)
-                    if self.DeviceTags.ROOT_REF in ref_dev.tags:
-                        self.add_relation(ref_name, "root_bias_mirror", m_name)
+                    # 如果是 Root Ref，记录特殊的 Bias 关系 (用于参数互锁)
+                    if is_root:
+                        self.add_relation(ref_name, AC.REL_STD_ROOT2BIAS, m_name)
 
         # --- 2. 处理低压电流镜 ---
         # 获取所有低压电流镜下层参考管
-        lower_ref_names = self.get_names_by_tag(self.DeviceTags.LV_MIRROR_LOWER_REF)
+        lower_ref_names = self.get_names_by_tag(AC.TAG_LV_LOWER_REF)
         
         for lower_ref_name in lower_ref_names:
             lower_ref_dev = self.circuit.devices_dict.get(lower_ref_name)
             if not lower_ref_dev: continue
 
-            # Ref 在电流束中，跳过
-            if self.DeviceTags.IN_CURRENT_BEAM in lower_ref_dev.tags:
+            # 如果 Lower Ref 在电流束中，跳过
+            if AC.TAG_IN_CURRENT_BEAM in lower_ref_dev.tags:
                 continue
 
             # 获取所有关联的镜像管 (Token)
-            # 注意：我们在 _mark_low_voltage_mirrors 中统一用 "lv_mirror_token" 存储了所有镜像管
-            mirror_names = self.get_relations(lower_ref_name, "lv_mirror_token")
+            mirror_names = self.get_relations(lower_ref_name, AC.REL_LV_LREF2TOKEN)
             
             for m_name in mirror_names:
                 m_dev = self.circuit.devices_dict.get(m_name)
-                if m_dev and self.DeviceTags.IN_CURRENT_BEAM not in m_dev.tags:
-                    self.add_tag(m_dev, self.DeviceTags.LV_MIRROR_BIAS_MIRROR)
+                if not m_dev: continue
+
+                # 标记不在电流束中的镜像管
+                if AC.TAG_IN_CURRENT_BEAM not in m_dev.tags:
+                    self.add_tag(m_dev, AC.TAG_LV_BIAS_MIRROR)
 
     # -------------------------------------------------子结构实例检测与登记----------------------------------------------------------
     # 函数识别顺序需要优化以提高代码效率
@@ -2603,23 +2612,14 @@ class CircuitAnalyzer:
         3.元素长度非4实际是指长度为2或4，4在现有逻辑中特指7与5的结合（即典型负载与跨束连接结构），因为现有的逻辑只能处理这两种长度；
         4.A型负载、B型负载、2管共模检测、跨束连接的顺序可换，典型负载顺序在A型负载之后。但在典型负载逻辑中加入二极管标签逻辑，即可与A型负载的识别解耦合
         """
-        def _register_helper(members: List['CircuitAnalyzer.Device'], sub_type: str,
-                             sub_id_prefix: str):  #
-            """
-                辅助函数：仅执行登记
-            """
-            if not members:
-                return
-            # 创建 sub_id
-            member_names = sorted([d.name for d in members])
-            sub_id = f"{sub_id_prefix}_{'_'.join(member_names)}"
+        AC = self.AC
 
-            # 登记
-            self.aggregate_substructure(
-                sub_type=sub_type,
-                members=members,
-                sub_id=sub_id
-            )
+        def _register_helper(members: List['CircuitAnalyzer.Device'], sub_key: str, group_key: str):
+            if not members: return
+            # 登记到 device_groups (方便后续查询，如 _get_tail_current)
+            self.add_group(group_key, [d.name for d in members])
+            # 登记子结构实例 (生成约束)
+            self.aggregate_substructure(sub_key, members)
 
         # --- 辅助函数 ---
         def _check_cross_beam_symmetry(mos_a: 'CircuitAnalyzer.Device',
@@ -2642,19 +2642,17 @@ class CircuitAnalyzer:
 
         # --- 构建镜像管 -> 参考管 的反向查找字典 ---
         mirror_to_ref_map: Dict[str, str] = {}
-        # (1) 普通电流镜: Ref -> Mirrors
-        cm_refs = self.get_names_by_tag(self.DeviceTags.CURRENT_MIRROR_REF)
-        for ref_name in cm_refs:
-            mirrors = self.get_relations(ref_name, "current_mirror_mirror")
-            for m_name in mirrors:
-                mirror_to_ref_map[m_name] = ref_name
-                
-        # (2) 低压电流镜: LowerRef -> Mirrors (Token)
-        lv_refs = self.get_names_by_tag(self.DeviceTags.LV_MIRROR_LOWER_REF)
-        for lower_ref_name in lv_refs:
-            mirrors = self.get_relations(lower_ref_name, "lv_mirror_token")
-            for m_name in mirrors:
-                mirror_to_ref_map[m_name] = lower_ref_name
+        # (A) 普通电流镜
+        for ref_name in self.relation_graph:
+            if AC.REL_STD_REF2MIRROR in self.relation_graph[ref_name]:
+                for m_name in self.relation_graph[ref_name][AC.REL_STD_REF2MIRROR]:
+                    mirror_to_ref_map[m_name] = ref_name
+        
+        # (B) 低压电流镜 (Token 均指向 Lower Ref)
+        for lower_ref_name in self.relation_graph:
+            if AC.REL_LV_LREF2TOKEN in self.relation_graph[lower_ref_name]:
+                for m_name in self.relation_graph[lower_ref_name][AC.REL_LV_LREF2TOKEN]:
+                    mirror_to_ref_map[m_name] = lower_ref_name
 
         # --- 主循环：遍历所有唯一的“对” ---
         processed_devices: Set[str] = set()
@@ -2663,9 +2661,8 @@ class CircuitAnalyzer:
         for beam_path in self.circuit.current_beam_paths.values():
             # beam_path 是 [Set[Dev], Set[Dev], ...]
             # 我们需要获取 *器件* 集合
-            beam_devices_sets = beam_path
 
-            for element_set_names in beam_devices_sets:
+            for element_set_names in beam_path:
                 # ---优先处理 4-器件结构，避免逻辑错误 ---
                 if len(element_set_names) == 4:
                     if any(element in processed_4_devices for element in element_set_names):
@@ -2677,10 +2674,10 @@ class CircuitAnalyzer:
                         continue  # 器件不存在
 
                     # 规则 1: 4管共模检测
-                    if all(self.DeviceTags.COMMON_4MOS in d.tags for d in members):  #
-                        _register_helper(members, "共模检测B", "cmfb")
+                    if all(AC.TAG_CM_4MOS in d.tags for d in members):
+                        _register_helper(members, AC.STR_CM_DETECT_B, AC.STR_CM_DETECT_B)
                         processed_4_devices.update(element_set_names)
-                        continue  # 登记成功
+                        continue
 
                     # 规则 2: 典型负载 (基于栅极连接)
                     g_net_groups: DefaultDict[str, List['CircuitAnalyzer.Device']] = defaultdict(list)  #
@@ -2693,12 +2690,10 @@ class CircuitAnalyzer:
 
                     if unique_g_nets == 1:
                         # 所有 4 个栅极相连
-                        for d in members: 
-                            self.add_tag(d, self.DeviceTags.LOAD_TYP)  #
-                        self.add_group("典型负载", list(element_set_names))
-                        _register_helper(members, "典型负载", "typ_load_quad")
+                        for d in members: self.add_tag(d, AC.TAG_LOAD_TYP)
+                        _register_helper(members, AC.STR_LOAD_TYPICAL, AC.STR_LOAD_TYPICAL)
                         processed_4_devices.update(element_set_names)
-                        continue  # 登记成功
+                        continue
 
                 # --- 处理所有器件对 ---
                 if len(element_set_names) >= 2:
@@ -2716,113 +2711,86 @@ class CircuitAnalyzer:
                             continue
 
                         members = [dev_a, dev_b]
-                        member_names_list = [dev_a_name, dev_b_name]
 
                         # --- 特殊或G连接的器件对 ---
                         # 规则 1: 差分输入对
-                        is_diff_pair = (
-                            (self.DeviceTags.DIFF_POSITIVE in dev_a.tags and self.DeviceTags.DIFF_NEGATIVE in dev_b.tags) or
-                            (self.DeviceTags.DIFF_NEGATIVE in dev_a.tags and self.DeviceTags.DIFF_POSITIVE in dev_b.tags)
-                        )
-
-                        if is_diff_pair:
-                            # [Refactor] add_group 替代 self.diff_pair.extend
-                            self.add_group("差分输入对", member_names_list)
-                            _register_helper(members, "差分输入对", "diff_pair")
-                            processed_devices.add(dev_a_name)
-                            processed_devices.add(dev_b_name)
+                        is_diff = (AC.TAG_DIFF_POS in dev_a.tags and AC.TAG_DIFF_NEG in dev_b.tags) or \
+                                  (AC.TAG_DIFF_NEG in dev_a.tags and AC.TAG_DIFF_POS in dev_b.tags)
+                        if is_diff:
+                            _register_helper(members, AC.STR_DIFF_PAIR, AC.STR_DIFF_PAIR)
+                            processed_devices.update([dev_a_name, dev_b_name])
                             continue
 
                         # 规则 2: 输出端对
-                        is_out_pair = (
-                            (self.DeviceTags.OUTPORT_POSITIVE in dev_a.tags and self.DeviceTags.OUTPORT_NEGATIVE in dev_b.tags) or
-                            (self.DeviceTags.OUTPORT_NEGATIVE in dev_a.tags and self.DeviceTags.OUTPORT_POSITIVE in dev_b.tags)
-                        )
-
-                        if is_out_pair:
-                            # [Refactor] add_group
-                            self.add_group("输出端对", member_names_list)
-                            _register_helper(members, "输出端对", "outport_pair")
-                            processed_devices.add(dev_a_name)
-                            processed_devices.add(dev_b_name)
+                        is_out = (AC.TAG_OUTPORT_POS in dev_a.tags and AC.TAG_OUTPORT_NEG in dev_b.tags) or \
+                                 (AC.TAG_OUTPORT_NEG in dev_a.tags and AC.TAG_OUTPORT_POS in dev_b.tags)
+                        if is_out:
+                            _register_helper(members, AC.STR_OUTPORT_PAIR, AC.STR_OUTPORT_PAIR)
+                            processed_devices.update([dev_a_name, dev_b_name])
                             continue
 
                         # 规则 3: A型负载 (二极管 + 镜像管)
-                        a_is_diode = self.DeviceTags.DIODE_MOS in dev_a.tags  #
-                        b_is_diode = self.DeviceTags.DIODE_MOS in dev_b.tags  #
-                        # 检查 b 是否是 a 的镜像 (从 RelationGraph 查)
-                        # a is ref? -> check relations
-                        a_mirrors = self.get_relations(dev_a_name, "current_mirror_mirror")
-                        b_mirrors = self.get_relations(dev_b_name, "current_mirror_mirror")
+                        a_is_diode = AC.TAG_DIODE_MOS in dev_a.tags
+                        b_is_diode = AC.TAG_DIODE_MOS in dev_b.tags
                         
-                        a_load_match = False
-                        if a_is_diode and dev_b_name in a_mirrors:
-                            self.add_tag(dev_a, self.DeviceTags.LOAD_A_DIO)
-                            self.add_tag(dev_b, self.DeviceTags.LOAD_A_TYP)
-                            a_load_match = True
-                        elif b_is_diode and dev_a_name in b_mirrors:
-                            self.add_tag(dev_b, self.DeviceTags.LOAD_A_DIO)
-                            self.add_tag(dev_a, self.DeviceTags.LOAD_A_TYP)
-                            a_load_match = True
-                            
-                        if a_load_match:
-                            self.add_group("A型负载", member_names_list)
-                            _register_helper(members, "A型负载", "a_load")
-                            processed_devices.add(dev_a_name)
-                            processed_devices.add(dev_b_name)
-                            continue
+                        # 检查镜像关系 (利用 Relation Graph)
+                        # Case A: A is Diode (Ref), B is Mirror
+                        a_mirrors = self.get_relations(dev_a_name, AC.REL_STD_REF2MIRROR)
+                        is_a_ref_b = dev_b_name in a_mirrors
+                        
+                        # Case B: B is Diode (Ref), A is Mirror
+                        b_mirrors = self.get_relations(dev_b_name, AC.REL_STD_REF2MIRROR)
+                        is_b_ref_a = dev_a_name in b_mirrors
 
-                        # 规则 4: B型负载 (两个二极管)
-                        if a_is_diode and b_is_diode:
-                            self.add_tag(dev_a, self.DeviceTags.LOAD_B)
-                            self.add_tag(dev_b, self.DeviceTags.LOAD_B)
-                            self.add_group("B型负载", member_names_list)
-                            _register_helper(members, "B型负载", "b_load")
-                            processed_devices.add(dev_a_name)
-                            processed_devices.add(dev_b_name)
+                        if a_is_diode and is_a_ref_b:
+                            self.add_tag(dev_a, AC.TAG_LOAD_A_DIO)
+                            self.add_tag(dev_b, AC.TAG_LOAD_A_TYP)
+                            _register_helper(members, AC.STR_LOAD_A, AC.STR_LOAD_A)
+                            processed_devices.update([dev_a_name, dev_b_name])
+                            continue
+                        elif b_is_diode and is_b_ref_a:
+                            self.add_tag(dev_b, AC.TAG_LOAD_A_DIO)
+                            self.add_tag(dev_a, AC.TAG_LOAD_A_TYP)
+                            _register_helper(members, AC.STR_LOAD_A, AC.STR_LOAD_A)
+                            processed_devices.update([dev_a_name, dev_b_name])
                             continue
 
                         # 规则 5: 典型负载 (来自电流镜)
                         ref_a = mirror_to_ref_map.get(dev_a_name)
                         ref_b = mirror_to_ref_map.get(dev_b_name)
                                                       
-                        if ref_a is not None and ref_a == ref_b:
-                            self.add_tag(dev_a, self.DeviceTags.LOAD_TYP)
-                            self.add_tag(dev_b, self.DeviceTags.LOAD_TYP)
-                            self.add_group("典型负载", member_names_list)
-                            _register_helper(members, "典型负载", "typ_load")
-                            processed_devices.add(dev_a_name)
-                            processed_devices.add(dev_b_name)
+                        if ref_a and ref_b and ref_a == ref_b:
+                            self.add_tag(dev_a, AC.TAG_LOAD_TYP)
+                            self.add_tag(dev_b, AC.TAG_LOAD_TYP)
+                            _register_helper(members, AC.STR_LOAD_TYPICAL, AC.STR_LOAD_TYPICAL)
+                            processed_devices.update([dev_a_name, dev_b_name])
                             continue
 
                         # 规则 6: 共模检测A
-                        a_is_common = dev_a_name in self.common_outer
-                        b_is_common = dev_b_name in self.common_outer
-
-                        if a_is_common != b_is_common: # XOR
-                            self.add_tag(dev_a, self.DeviceTags.COMMON_2MOS)
-                            self.add_tag(dev_b, self.DeviceTags.COMMON_2MOS)
-
-                            target_dev = dev_b if a_is_common else dev_a
-                            self.add_tag(target_dev, self.DeviceTags.COMMON_INNER)
-
-                            _register_helper(members, "共模检测A", "common_pair")
-                            processed_devices.add(dev_a_name)
-                            processed_devices.add(dev_b_name)
+                        a_is_outer = AC.TAG_CM_OUTER in dev_a.tags
+                        b_is_outer = AC.TAG_CM_OUTER in dev_b.tags
+                        
+                        if a_is_outer != b_is_outer: # XOR
+                            self.add_tag(dev_a, AC.TAG_CM_2MOS)
+                            self.add_tag(dev_b, AC.TAG_CM_2MOS)
+                            
+                            inner = dev_b if a_is_outer else dev_a
+                            self.add_tag(inner, AC.TAG_CM_INNER)
+                            
+                            _register_helper(members, AC.STR_CM_DETECT_A, AC.STR_CM_DETECT_A)
+                            processed_devices.update([dev_a_name, dev_b_name])
                             continue
 
                         # --- 非 G-连接的对称负载 ---
-                        g_net_a = dev_a.terminals.get("G")
-                        g_net_b = dev_b.terminals.get("G")
-                        if g_net_a and g_net_b and g_net_a != g_net_b:
+                        g_a = dev_a.terminals.get("G")
+                        g_b = dev_b.terminals.get("G")
+                        if g_a and g_b and g_a != g_b:
                             if _check_cross_beam_symmetry(dev_a, dev_b):
-                                self.add_tag(dev_a, self.DeviceTags.LOAD_C)
-                                self.add_tag(dev_b, self.DeviceTags.LOAD_C)
-                                self.add_group("C型负载", member_names_list)
-                                _register_helper(members, "C型负载", "C_load_cross")
-                                processed_devices.add(dev_a_name)
-                                processed_devices.add(dev_b_name)
-                                continue  # 登记成功
+                                self.add_tag(dev_a, AC.TAG_LOAD_C)
+                                self.add_tag(dev_b, AC.TAG_LOAD_C)
+                                _register_helper(members, AC.STR_LOAD_C, AC.STR_LOAD_C)
+                                processed_devices.update([dev_a_name, dev_b_name])
+                                continue
 
     # ---------------------------------------------登记低压电流镜中的对称镜像对---------------------------------------------------
     def _register_lv_mirror_pairs(self):
@@ -2834,63 +2802,41 @@ class CircuitAnalyzer:
         _detect_low_voltage_current_mirrors 之后 
         analyze_current_beams 之后
         """
+        AC = self.AC
+
         processed_pairs = set()  # 避免同一对被重复登记
 
         # 遍历所有电流束
-        for beam_id, paths_list in self.circuit.current_beams.items():
-            # 遍历该束中的每条路径
+        for paths_list in self.circuit.current_beams.values():
             for path in paths_list:
-                devices_in_path = path[::2]  # 只获取器件名称 (偶数索引)
+                devices = path[::2] # [M1, M2, M3...]
+                if len(devices) < 2: continue
+                
+                for i in range(len(devices) - 1):
+                    name_a = devices[i]
+                    name_b = devices[i+1]
+                    
+                    pair_key = frozenset([name_a, name_b])
+                    if pair_key in processed_pairs: continue
 
-                if len(devices_in_path) < 2:
-                    continue
-
-                # 遍历路径中所有 *连续的* 器件对
-                for i in range(len(devices_in_path) - 1):
-                    dev_a_name = devices_in_path[i]
-                    dev_b_name = devices_in_path[i + 1]
-
-                    # 检查是否已处理 (排序以确保 frozenset 唯一)
-                    pair_fset = frozenset([dev_a_name, dev_b_name])
-                    if pair_fset in processed_pairs:
-                        continue
-
-                    try:
-                        dev_a = self.circuit.devices_dict[dev_a_name]
-                        dev_b = self.circuit.devices_dict[dev_b_name]
-                    except KeyError:
-                        continue  # 器件不存在
-
-                    # --- 检查核心逻辑 ---
-                    # 1. 检查是否为非偏置管（这里逻辑冗余，因为电流束中的器件一定没有偏置标签）
-                    # is_bias_a = self.DeviceTags.LV_MIRROR_BIAS_MIRROR in dev_a.tags
-                    # is_bias_b = self.DeviceTags.LV_MIRROR_BIAS_MIRROR in dev_b.tags
-                    # if is_bias_a or is_bias_b:
-                    #     continue  # 任意一个是偏置管，则跳过
+                    dev_a = self.circuit.devices_dict.get(name_a)
+                    dev_b = self.circuit.devices_dict.get(name_b)
+                    if not dev_a or not dev_b: continue
 
                     # 2. 检查是否为 上/下 镜像对
-                    is_upper_a = self.DeviceTags.LV_MIRROR_UPPER_MIRROR in dev_a.tags
-                    is_lower_a = self.DeviceTags.LV_MIRROR_LOWER_MIRROR in dev_a.tags
-                    is_upper_b = self.DeviceTags.LV_MIRROR_UPPER_MIRROR in dev_b.tags
-                    is_lower_b = self.DeviceTags.LV_MIRROR_LOWER_MIRROR in dev_b.tags
+                    is_u_a = AC.TAG_LV_UPPER_MIRROR in dev_a.tags
+                    is_l_a = AC.TAG_LV_LOWER_MIRROR in dev_a.tags
+                    is_u_b = AC.TAG_LV_UPPER_MIRROR in dev_b.tags
+                    is_l_b = AC.TAG_LV_LOWER_MIRROR in dev_b.tags
 
-                    is_pair_match = (is_upper_a and is_lower_b) or (is_lower_a and is_upper_b)
-
-                    if is_pair_match:
-                        # 3. 登记
-                        self.add_tag(dev_a, self.DeviceTags.LV_MIRROR_PAIR)
-                        self.add_tag(dev_b, self.DeviceTags.LV_MIRROR_PAIR)
-                        
-                        # [Refactor] 也可以记录分组，方便后续查询
-                        self.add_group("低压镜像对", [dev_a_name, dev_b_name])
-
-                        self.aggregate_substructure(
-                            sub_type="低压镜像对",
-                            members=[dev_a, dev_b],
-                            sub_id=f"lv_mirror_pair_{dev_a_name}_{dev_b_name}"
-                        )
-
-                        processed_pairs.add(pair_fset)
+                    is_match = (is_u_a and is_l_b) or (is_l_a and is_u_b)
+                    
+                    if is_match:
+                        self.add_tag(dev_a, AC.TAG_LV_PAIR)
+                        self.add_tag(dev_b, AC.TAG_LV_PAIR)
+                        self.add_group(AC.STR_LV_MIRROR_PAIR, [name_a, name_b])
+                        self.aggregate_substructure(AC.STR_LV_MIRROR_PAIR, [dev_a, dev_b])
+                        processed_pairs.add(pair_key)
 
     # ---------------------------------------------登记低压电流镜 ---------------------------------------------------
     def _register_lv_mirrors(self):
@@ -2901,45 +2847,29 @@ class CircuitAnalyzer:
         **要在识别低压电流镜后调用**
         _detect_low_voltage_current_mirrors 之后
         """
-        # 1. 获取所有锚点 (下层参考管)
-        lower_ref_names = self.get_names_by_tag(self.DeviceTags.LV_MIRROR_LOWER_REF)
-        
-        for lower_ref_name in lower_ref_names:
-            lower_ref_dev = self.circuit.devices_dict.get(lower_ref_name)
-            if not lower_ref_dev: continue
-            
-            # 2. 从关系图中拉取成员
-            # 注意：我们在 _mark_low_voltage_mirrors 中定义了这些关系键
-            upper_ref_names = self.get_relations(lower_ref_name, "lv_upper_ref")
-            upper_bias_names = self.get_relations(lower_ref_name, "lv_upper_bias")
-            mirror_token_names = self.get_relations(lower_ref_name, "lv_mirror_token")
-            
-            # 组装所有成员名称
-            all_member_names = [lower_ref_name]
-            all_member_names.extend(upper_ref_names)
-            all_member_names.extend(upper_bias_names)
-            all_member_names.extend(mirror_token_names)
-            
-            # 去重 (防止数据异常) 并获取对象
-            unique_members_list = []
-            seen = set()
-            for name in all_member_names:
-                if name in seen: continue
-                seen.add(name)
-                
-                dev = self.circuit.devices_dict.get(name)
-                if dev:
-                    unique_members_list.append(dev)
-                else:
-                    print(f"警告：在登记低压电流镜 {lower_ref_name} 时未找到器件 {name}。")
+        AC = self.AC
 
-            # 3. 登记子结构
-            if len(unique_members_list) >= 4: # 至少要有 LowerRef, UpperRef, 2 Mirrors
-                self.aggregate_substructure(
-                    sub_type="低压电流镜",
-                    members=unique_members_list,
-                    sub_id=f"lv_mirror_{lower_ref_name}"
-                )
+        # 1. 获取所有锚点 (下层参考管)
+        lower_refs = self.get_names_by_tag(AC.TAG_LV_LOWER_REF)
+        
+            
+        # 2. 从关系图中拉取成员
+        # 注意：我们在 _mark_low_voltage_mirrors 中定义了这些关系键
+        for l_ref_name in lower_refs:
+        # 从 RelationGraph 提取成员
+            u_ref_names = self.get_relations(l_ref_name, AC.REL_LV_LREF2UREF)
+            u_bias_names = self.get_relations(l_ref_name, AC.REL_LV_LREF2UBIAS)
+            tokens = self.get_relations(l_ref_name, AC.REL_LV_LREF2TOKEN)
+            
+            all_names = {l_ref_name} | set(u_ref_names) | set(u_bias_names) | set(tokens)
+            members = []
+            for name in all_names:
+                d = self.circuit.devices_dict.get(name)
+                if d: members.append(d)
+            
+            # 至少 4 个成员 (LRef, URef, 2 Mirrors)
+            if len(members) >= 4:
+                self.aggregate_substructure(AC.STR_LV_MIRROR, members)
 
     # -----------------------------------------------登记普通电流镜 --------------------------------------------------
     def _register_current_mirrors(self):
@@ -2950,32 +2880,21 @@ class CircuitAnalyzer:
         **要在识别低压电流镜后调用**
         _detect_low_voltage_current_mirrors之后
         """
+        AC = self.AC
         # 1. 获取所有参考管
-        ref_names = self.get_names_by_tag(self.DeviceTags.CURRENT_MIRROR_REF)
+        refs = self.get_names_by_tag(AC.TAG_STD_MIRROR_REF)
         
-        for ref_name in ref_names:
-            ref_dev = self.circuit.devices_dict.get(ref_name)
-            if not ref_dev: continue
-
-            # 2. 从关系图中拉取镜像管
-            mirror_names = self.get_relations(ref_name, "current_mirror_mirror")
+        for ref_name in refs:
+            mirrors = self.get_relations(ref_name, AC.REL_STD_REF2MIRROR)
             
-            # 组装成员
-            all_members = [ref_dev]
-            for m_name in mirror_names:
-                m_dev = self.circuit.devices_dict.get(m_name)
-                if m_dev:
-                    all_members.append(m_dev)
-                else:
-                    print(f"警告：在登记普通电流镜 {ref_name} 时未找到镜像管 {m_name}。")
-
-            # 3. 登记子结构 (至少 1 Ref + 1 Mirror)
-            if len(all_members) >= 2:
-                self.aggregate_substructure(
-                    sub_type="普通电流镜",
-                    members=all_members,
-                    sub_id=f"current_mirror_{ref_name}"
-                )
+            all_names = {ref_name} | set(mirrors) 
+            members = []
+            for name in all_names:
+                d = self.circuit.devices_dict.get(name)
+                if d: members.append(d)
+                
+            if len(members) >= 2:
+                self.aggregate_substructure(AC.STR_STD_MIRROR, members)
 
     # ---------------------------------------缓存尾电流源--------------------------------------------
     def _get_tail_current(self):
@@ -2989,6 +2908,7 @@ class CircuitAnalyzer:
         _register_beam_substructures 之后
         _register_lv_mirror_pairs 之后
         """
+        AC = self.AC
         # 获取路径数据，若不存在则返回
         path1 = self.circuit.current_beam_paths.get("beam_2_differential")
         path2 = self.circuit.current_beam_paths.get("beam_3_output")
@@ -3003,8 +2923,7 @@ class CircuitAnalyzer:
                 # 提取唯一的管子名称
                 # set无序，转list取第0个即可，不需要排序
                 dev_name = list(element_set)[0]
-                self.input_tail.append(dev_name)
-                self.add_group("输入尾电流源", [dev_name])
+                self.add_group(AC.STR_TAIL_INPUT, [dev_name])
 
         if not path2:
             return
@@ -3042,12 +2961,12 @@ class CircuitAnalyzer:
                     if dev_a.type not in ["PMOS", "NMOS"] or dev_b.type not in ["PMOS", "NMOS"]:
                         continue
 
-                    g_a = dev_a.terminals.get("G")
-                    g_b = dev_b.terminals.get("G")
+                    g_a = dev_a.terminals.get("G", "")
+                    g_b = dev_b.terminals.get("G", "")
 
                     # 检查栅极是否连接在一起
                     if self._net_matches(g_a, {g_b}):
-                        self.add_group("公共尾电流源", [name_a, name_b])
+                        self.add_group(AC.STR_TAIL_COMMON, [name_a, name_b])
                         processed_mos.add(name_a)
                         processed_mos.add(name_b)
 
@@ -3083,19 +3002,19 @@ class CircuitAnalyzer:
                 continue
 
             # 检查标签
-            has_typ_load = self.DeviceTags.LOAD_TYP in dev.tags
-            has_lv_mirror_pair = self.DeviceTags.LV_MIRROR_PAIR in dev.tags
+            has_typ = AC.TAG_LOAD_TYP in dev.tags
+            has_lv_pair = AC.TAG_LV_PAIR in dev.tags
 
             # 规则: 若不存在典型负载标签，直接跳过
-            if not has_typ_load:
+            if not has_typ:
                 i += 1
                 continue
 
             # 存在典型负载标签
-            if not has_lv_mirror_pair:
+            if not has_lv_pair:
                 # 情况 A: 不存在低压电流镜镜像对标签
                 # 存入当前两个管子 [A, B]
-                self.add_group("输出尾电流源", current_list)
+                self.add_group(AC.STR_TAIL_OUTPUT, current_list)
                 i += 1
             else:
                 # 情况 B: 存在低压电流镜镜像对标签
@@ -3104,7 +3023,7 @@ class CircuitAnalyzer:
                 if i + 1 < n:
                     next_list = list(filtered_path2[i + 1])
                     combined_list = current_list + next_list
-                    self.add_group("输出尾电流源", combined_list)
+                    self.add_group(AC.STR_TAIL_OUTPUT, combined_list)
                     # 跳过下一个元素，处理下下个
                     i += 2
                 else:
@@ -3123,6 +3042,8 @@ class CircuitAnalyzer:
         """
         # 1. 获取第一个电流束的网络集合
         # 对应 "beam_net_sets中第一个键的值"
+        AC = self.AC
+
         beam1_nets = self.circuit.beam_net_sets.get("beam_2_differential")
 
         if not beam1_nets:
@@ -3132,7 +3053,7 @@ class CircuitAnalyzer:
         beam1_nets_lower = {n.lower() for n in beam1_nets}
 
        # 2. 获取候选的 "输出端对" (从之前的步骤中注册的分组获取)
-        candidate_pairs = self.get_groups("输出端对") # List[List[str]]
+        candidate_pairs = self.device_groups.get(AC.STR_OUTPORT_PAIR, []) # List[List[str]]
 
         for pair in candidate_pairs:
             # pair 是 [name_a, name_b]
@@ -3154,12 +3075,10 @@ class CircuitAnalyzer:
             # 4. 检测是否是子集
             # 即：两个管子的栅极网络都在 beam1 的网络集合中
             if g_net_a.lower() in beam1_nets_lower and g_net_b.lower() in beam1_nets_lower:
-                # [Refactor] 存入 "输出对" 分组
-                self.add_group("输出对", [name_a, name_b])
-                
-                # 还可以顺便打上逻辑标签
-                self.add_tag(dev_a, self.DeviceTags.OUTPUT_POSITIVE) # 只是示例，具体正负可能需要更细致判断
-                self.add_tag(dev_b, self.DeviceTags.OUTPUT_NEGATIVE)
+                self.add_group(AC.STR_OUTPUT_PAIR, pair)
+                self.add_tag(dev_a, AC.TAG_OUTPUT_POS) # 简化分配
+                self.add_tag(dev_b, AC.TAG_OUTPUT_NEG)
+                self.aggregate_substructure(AC.STR_OUTPUT_PAIR, [dev_a, dev_b])
                 break
 
     # ------------------------------------------登记频率补偿和RC共模检测 ------------------------------------------------
@@ -3170,28 +3089,19 @@ class CircuitAnalyzer:
         **要在标记输出端器件后调用**
         _mark_output_devices 之后
         """
+        AC = self.AC
+
         # 1. 登记 频率补偿
         # [Refactor] 直接查询拥有 COMPENSATE 标签的所有器件
-        comp_members = self.get_devices_by_tag(self.DeviceTags.COMPENSATE)
-        
+        # 频率补偿
+        comp_members = self.get_devices_by_tag(AC.TAG_COMPENSATE)
         if comp_members:
-            # 保持原有的聚合逻辑：所有补偿器件作为一个大组
-            self.aggregate_substructure(
-                sub_type="频率补偿",
-                members=comp_members,
-                sub_id="compensate_rc_global"
-            )
+            self.aggregate_substructure(AC.STR_FREQ_COMPENSATE, comp_members)
 
-        # 2. 登记 RC共模检测
-        # [Refactor] 直接查询拥有 RC_COMMON_DETECT 标签的所有器件
-        rc_cm_members = self.get_devices_by_tag(self.DeviceTags.RC_COMMON_DETECT)
-        
+        # RC 共模检测
+        rc_cm_members = self.get_devices_by_tag(AC.TAG_RC_CM_DETECT)
         if rc_cm_members:
-            self.aggregate_substructure(
-                sub_type="RC共模检测",
-                members=rc_cm_members,
-                sub_id="rc_common_detect_rc_global"
-            )
+            self.aggregate_substructure(AC.STR_RC_CM_DETECT, rc_cm_members)
 
     # -------------------------------------------登记对称电容-------------------------------------------
     def _register_sym_capacitors(self):
@@ -3202,15 +3112,15 @@ class CircuitAnalyzer:
         **要在标记输出端器件后调用**
         _mark_outport_devices 之后
         """
+        AC = self.AC
+
         # 1. 收集候选电容
         caps_to_check = []
         for d in self.circuit.devices_dict.values():
             if d.type == "Capacitor":
                 # 排除已标记的电容
-                if (self.DeviceTags.COMPENSATE in d.tags or 
-                    self.DeviceTags.RC_COMMON_DETECT in d.tags):
-                    continue
-                caps_to_check.append(d)
+                if AC.TAG_COMPENSATE not in d.tags and AC.TAG_RC_CM_DETECT not in d.tags:
+                    caps_to_check.append(d)
 
         if len(caps_to_check) < 2:
             return  # 没有足够的电容进行配对
@@ -3264,18 +3174,14 @@ class CircuitAnalyzer:
                 # 5. 匹配检查与登记
                 # 调用提取出的核心函数
                 if self._check_mos_sets_in_one_beam(set_mos_1, set_mos_2):
-                    self.add_tag(c1, self.DeviceTags.SYM_CAPACITOR)
-                    self.add_tag(c2, self.DeviceTags.SYM_CAPACITOR)
+                    self.add_tag(c1, AC.TAG_SYM_CAPACITOR)
+                    self.add_tag(c2, AC.TAG_SYM_CAPACITOR)
                     
                     # [Refactor] 存入分组
-                    self.add_group("对称电容", [c1.name, c2.name])
+                    self.add_group(AC.STR_SYM_CAPACITOR, [c1.name, c2.name])
 
                     # 登记
-                    self.aggregate_substructure(
-                        sub_type="对称电容",
-                        members=[c1, c2],
-                        sub_id=f"sym_cap_{c1.name}_{c2.name}"
-                    )
+                    self.aggregate_substructure(AC.STR_SYM_CAPACITOR, [c1, c2])
                     # 标记为已处理
                     processed_caps.add(c1.name)
                     processed_caps.add(c2.name)
@@ -3283,104 +3189,112 @@ class CircuitAnalyzer:
                     break
 
     # -------------------------------------子结构实例登记函数-----------------------------------------
-    def aggregate_substructure(self, sub_type: str, members: List['CircuitAnalyzer.Device'],
-                               sub_id: str):  #
+    def aggregate_substructure(self, struct_key: str, members: List['Device']):
         """
-        将一组器件登记为一个子结构实例。
-
-        这个函数要考虑是否需要存在以及如何修改
+        [统一接口] 登记子结构实例。
+        替换了原代码中分散的 aggregate_substructure 调用。
+        
+        Args:
+            struct_key: AnalysisConfig.STR_XXX
+            members: 器件对象列表
         """
-        sub_def = self.circuit.substructure_types.get(sub_type)
+        # 1. 获取定义
+        sub_def = self.substructure_types.get(struct_key)
         if not sub_def:
+            # 仅在开发阶段警告，生产环境可忽略或记录日志
+            # print(f"[System] 未注册的子结构类型: {struct_key}")
             return
+
+        # 2. 校验聚合规则 (Tag Check)
         member_roles = set().union(*[d.tags for d in members])
         if not sub_def.aggregation_rule(member_roles):
+            # print(f"[System] {struct_key} 成员标签校验失败: {member_roles}")
             return
+
+        # 3. 生成统一 ID
+        sub_id = sub_def.generate_id(members)
+
+        # 4. 生成对象化约束 (Constraint Objects)
         try:
-            constraints = sub_def.constraint_rules(members)
+            constraints = sub_def.constraint_generator(members)
         except Exception as e:
             traceback.print_exc()
-            return
+            print(f"[Error] 约束生成异常 ({struct_key}): {e}")
+            constraints = []
 
-        self.circuit.substructures.append(self.CircuitSub(  #
+        # 5. 存储到 Circuit
+        # 注意: CircuitSub.constraints 现在存储 List[Constraint] 对象
+        self.circuit.substructures.append(self.CircuitSub(
             sub_id=sub_id,
-            type=sub_type,
+            type=struct_key, 
             members=[d.name for d in members],
-            constraints=constraints
+            constraints= constraints
         ))
 
+        # 6. 反向索引
         for device in members:
-            device.substructures.append(self.DeviceSub(sub_type=sub_type, sub_id=sub_id))  #
+            device.substructures.append(self.DeviceSub(sub_type=struct_key, sub_id=sub_id))
 
 
     #----------------------------------------------------约束生成------------------------------------------------------------
     def _generate_constraint_groups(self):
         """
-        遍历所有已登记子结构的约束，构建参数依赖图。
-        使用DFS查找图中的所有连通分量 (受约束的参数)。
-        添加所有未受约束的独立参数。
-        将最终结果存储在 self.constraint_groups 中。
+        [重构版] 生成参数约束组。
+        现在读取 Constraint 对象，不再解析字符串。
         """
+        # 邻接表: { "M1_l": {"M2_l", "M3_l"}, ... }
         adj_list: DefaultDict[str, Set[str]] = defaultdict(set)
 
-        # 1. 构建邻接表
+        # 1. 遍历所有已登记子结构的约束对象
         for instance in self.circuit.substructures:
-            for constraint_str in instance.constraints:
-                try:
-                    # 解析 "param_a = param_b" 格式
-                    parts = constraint_str.split("=")
-                    if len(parts) != 2:
-                        continue  # 忽略格式错误的约束
+            # instance.constraints 是 List[Constraint]
+            for c in instance.constraints:
+                # 仅处理 EQUAL 类型的约束用于生成连通分量
+                # RATIO_W 类型 (fw 比例) 不参与强相等分组，由 r_raw 阶段独立处理
+                if c.type == CircuitAnalyzer.ConstraintType.EQUAL:
+                    # 构造参数全名: "M1_l"
+                    param_a = f"{c.target_dev_name}_{c.target_param}"
+                    param_b = f"{c.source_dev_name}_{c.source_param}"
+                    
+                    # 添加无向边
+                    adj_list[param_a].add(param_b)
+                    adj_list[param_b].add(param_a)
 
-                    param_a = parts[0].strip()
-                    param_b = parts[1].strip()
-
-                    # 添加无向边 (格式已在约束函数中改为 '_')
-                    if param_a and param_b:
-                        adj_list[param_a].add(param_b)
-                        adj_list[param_b].add(param_a)
-                except Exception:
-                    # 捕获潜在的解析错误
-                    print(f"警告：无法解析约束 '{constraint_str}'")
-                    continue
-
-        # 2. 获取 *所有* 可能的参数
+        # 2. 获取 *所有* 可能的参数 (作为节点全集)
         all_params_set: Set[str] = set()
         for device in self.circuit.devices_dict.values():
             for param_key in device.params.keys():
-                all_params_set.add(f"{device.name}_{param_key}")  #
+                all_params_set.add(f"{device.name}_{param_key}")
 
-        # 3. 查找连通分量 (受约束的参数)
+        # 3. 查找连通分量 (DFS)
         visited: Set[str] = set()
         all_components: List[List[str]] = []
 
-        for param in adj_list:  # 只需要从有约束的参数开始遍历
+        # 3a. 处理有约束的参数
+        for param in adj_list:
             if param not in visited:
-                # 发现新组件，开始DFS
-                current_component: List[str] = []
+                component: List[str] = []
                 stack: List[str] = [param]
-
+                
                 while stack:
                     node = stack.pop()
                     if node not in visited:
                         visited.add(node)
-                        current_component.append(node)
-
-                        # 将所有未访问的邻居加入栈
+                        component.append(node)
+                        # 邻居入栈
                         for neighbor in adj_list[node]:
                             if neighbor not in visited:
                                 stack.append(neighbor)
+                
+                component.sort()
+                all_components.append(component)
 
-                # 排序以保证输出一致性 (可选，但推荐)
-                current_component.sort()
-                all_components.append(current_component)
-
-        # 4. 添加所有独立的 (未受约束的) 参数
+        # 3b. 处理孤立参数 (无约束)
         for param in all_params_set:
             if param not in visited:
-                all_components.append([param])  # 添加为长度为1的列表
+                all_components.append([param])
 
-        # 5. 存储结果到 Analyzer 属性
+        # 4. 存储结果
         self.constraint_groups = all_components
 
     # -----------------------------------------------------修改初始值 -----------------------------------------------------------
@@ -3463,77 +3377,31 @@ class CircuitAnalyzer:
         except (KeyError, ValueError):
             print(f"警告：无法设置参数 {param_name}")
 
-    def _is_copy_tube(self, target_param_name: str, ref_param_name: str) -> bool:
+    def _is_copy_tube(self, target_dev: 'CircuitAnalyzer.Device', ref_dev: 'CircuitAnalyzer.Device') -> bool:
         """
         辅助函数：检查一个 'l' 参数是否属于"复制管"。
         普通电流镜：参考管是根参考管，所有镜像管都是复制管；参考管在偏置电路不是根参考管，所有非偏置镜像管是复制管；参考管在主电路，所有镜像管是复制管
         低压电流镜：下层参考管在主电路，所有镜像管是复制管；下层参考管在偏置电路，所有非偏置镜像管是复制管
 
-        这里逻辑需要修改，例如l的存在完全没有必要
         """
-        try:
-            target_dev_name, key = target_param_name.rsplit("_", 1)
-            if key != 'l':  # 补偿只适用于 'l'
-                return False
+        AC = self.AC
 
-            ref_dev_name, _ = ref_param_name.rsplit("_", 1)
-
-            target_dev = self.circuit.devices_dict[target_dev_name]
-            ref_dev = self.circuit.devices_dict[ref_dev_name]
-        except (KeyError, ValueError, AttributeError):
-            return False
-
-        # --- 检查普通电流镜 (V6 定义 1.1, 1.2) ---
-        if ref_dev_name in self.current_cache and target_dev_name in self.current_cache[ref_dev_name]:
-            is_ref_in_beam = self.DeviceTags.IN_CURRENT_BEAM in ref_dev.tags
-            is_ref_root = self.DeviceTags.ROOT_REF in ref_dev.tags
-            if is_ref_in_beam or is_ref_root:
-                return True
+        # 1. 参考管状态
+        ref_is_root = AC.TAG_ROOT_REF in ref_dev.tags
+        ref_in_beam = AC.TAG_IN_CURRENT_BEAM in ref_dev.tags
+        
+        # 2. 目标管状态
+        target_in_beam = AC.TAG_IN_CURRENT_BEAM in target_dev.tags
+        
+        # 判定
+        if ref_is_root or ref_in_beam:
+            return True # 必须复制
+        else:
+            # Ref 是 Bias，看 Target
+            if target_in_beam:
+                return True # Bias -> Beam (提供电流)，需要复制
             else:
-                return self.DeviceTags.IN_CURRENT_BEAM in target_dev.tags
-
-        # --- 检查低压电流镜 (V6 定义 2.1 - 2.4) ---
-        lv_sub_ref = next((s for s in target_dev.substructures if s.sub_type == "低压电流镜"), None)
-        if not lv_sub_ref:
-            return False  # B 不是 LV 镜像管
-
-        lv_sub = next((s for s in self.circuit.substructures if s.sub_id == lv_sub_ref.sub_id), None)
-        if not lv_sub:
-            return False  # 找不到子结构实例
-
-        try:
-            members = {name: self.circuit.devices_dict[name] for name in lv_sub.members}
-            upper_bias_dev = next((d for d in members.values() if self.DeviceTags.LV_MIRROR_UPPER_BIAS in d.tags))
-
-            # 找到 "上层管" (非二极管连接的那个)
-            upper_ref_dev = next((d for d in members.values() if
-                                    self.DeviceTags.LV_MIRROR_UPPER_REF in d.tags
-                                    and self.DeviceTags.DIODE_MOS not in d.tags))
-        except (StopIteration, KeyError):
-            print(f"警告：在 {lv_sub.sub_id} 中找不到 LV 关键器件，无法应用补偿。")
-            return False
-
-        is_coupled = upper_bias_dev
-        is_in_beam = self.DeviceTags.IN_CURRENT_BEAM in upper_ref_dev.tags
-        is_bias_mirror = self.DeviceTags.LV_MIRROR_BIAS_MIRROR in target_dev.tags
-
-        # (2.1) 独立 & 在束
-        if not is_coupled and is_in_beam:
-            return True  # B 是所有镜像管
-
-        # (2.2) 独立 & 偏置
-        if not is_coupled and not is_in_beam:
-            return not is_bias_mirror  # B 是所有非偏置镜像管
-
-        # (2.3) 耦合 & 在束
-        if is_coupled and is_in_beam:
-            return True  # B 是所有镜像管
-
-        # (2.4) 耦合 & 偏置
-        if is_coupled and not is_in_beam:
-            return not is_bias_mirror  # B 是所有非偏置镜像管
-
-        return False
+                return False # Bias -> Bias (传递电压/电流)，严格相等
 
     # ----------------------------------------------------- 预计算 r_raw -----------------------------------------------------------
     def _get_w_over_l(self, dev_name: str, params_dict: Dict) -> Optional[float]:
@@ -3569,120 +3437,88 @@ class CircuitAnalyzer:
 
         这里存在逻辑冗余
         """
+        AC = self.AC
+
         print("\n" + "=" * 30 + " 预计算 r_raw 真值 " + "=" * 30)
         # 使用 self.device_params (原始CDF值)
         params_dict = self.device_params
 
-        # 1. 处理普通电流镜
-        for ref_name, mirror_list in self.current_cache.items():
+        # --- 1. 普通电流镜 ---
+        std_refs = self.get_names_by_tag(AC.TAG_STD_MIRROR_REF)
+        for ref_name in std_refs:
+            ref_dev = self.circuit.devices_dict.get(ref_name)
+            if not ref_dev: continue
+
+            # 获取 W/L
             ref_wl = self._get_w_over_l(ref_name, params_dict)
-            if ref_wl is None:
-                print(f"  [警告] CM Ref {ref_name} W/L 计算失败，跳过其镜像管。")
-                continue
+            if ref_wl is None: continue
 
-            for copy_name in mirror_list:
-                # 使用 _is_copy_tube 检查（尽管这里大部分都是）
-                if self._is_copy_tube(f"{copy_name}_l", f"{ref_name}_l"):
-                    copy_wl = self._get_w_over_l(copy_name, params_dict)
-                    if copy_wl is None:
-                        print(f"  [警告] CM Copy {copy_name} W/L 计算失败。")
-                        continue
+            # 遍历镜像管
+            mirrors = self.get_relations(ref_name, AC.REL_STD_REF2MIRROR)
+            for m_name in mirrors:
+                m_dev = self.circuit.devices_dict.get(m_name)
+                if not m_dev: continue
 
-                    if ref_wl == 0.0:
-                        print(f"  [警告] CM Ref {ref_name} W/L 为 0，无法计算 r_raw。")
-                        continue
+                # 判定是否为复制管
+                if self._is_copy_tube(m_dev, ref_dev):
+                    m_wl = self._get_w_over_l(m_name, params_dict)
+                    if m_wl is None: continue
+                    
+                    r_raw = m_wl / ref_wl
+                    self.copy_tube_r_raw_map[m_name] = (ref_name, r_raw)
+                    print(f"  [STD] CopyTube: {m_name} (Ref: {ref_name}), r_raw={r_raw:.4f}")
 
-                    r_raw = copy_wl / ref_wl
-                    self.copy_tube_r_raw_map[copy_name] = (ref_name, r_raw)
-                    print(f"  [CM] 记录 {copy_name} (Ref: {ref_name}), r_raw = {r_raw:.4f}")
+        # --- 2. 低压电流镜 ---
+        lv_lower_refs = self.get_names_by_tag(AC.TAG_LV_LOWER_REF)
+        for l_ref_name in lv_lower_refs:
+            l_ref_dev = self.circuit.devices_dict.get(l_ref_name)
+            if not l_ref_dev: continue
+            
+            # 获取 Lower Ref W/L
+            l_ref_wl = self._get_w_over_l(l_ref_name, params_dict)
+            
+            # 获取 Upper Ref (通过关系)
+            u_ref_names = self.get_relations(l_ref_name, AC.REL_LV_LREF2UREF)
+            if not u_ref_names: continue
+            u_ref_name = u_ref_names[0] # 理论上只有一个
+            u_ref_wl = self._get_w_over_l(u_ref_name, params_dict)
 
-        # 2. 处理低压电流镜
-        # lv_current 格式: {lower_ref_name: [sign, upper_ref, (upper_bias), mirror1, mirror2, ...]}
-        for lower_ref_name, value_list in self.lv_current.items():
-            # --- 必须为上/下层管分别计算 W/L 参考 ---
+            if l_ref_wl is None or u_ref_wl is None: continue
 
-            # 2a. 获取下层参考管 W/L
-            lower_ref_wl = self._get_w_over_l(lower_ref_name, params_dict)
-            if lower_ref_wl is None:
-                print(f"  [警告] LV Ref {lower_ref_name} W/L 计算失败，跳过其镜像管。")
-                continue
+            # 遍历所有 Token (Upper Mirrors + Lower Mirrors)
+            tokens = self.get_relations(l_ref_name, AC.REL_LV_LREF2TOKEN)
+            for t_name in tokens:
+                t_dev = self.circuit.devices_dict.get(t_name)
+                if not t_dev: continue
 
-            # 2b. 查找 'upper_ref' 管 (与 _is_copy_tube 逻辑一致)
-            upper_ref_name = value_list[1]
-            try:
-                # 找到子结构实例
-                lower_ref_dev = self.circuit.devices_dict[lower_ref_name]
-                lv_sub_ref = next((s for s in lower_ref_dev.substructures if s.sub_type == "低压电流镜"), None)
-                if not lv_sub_ref:
-                    print(f"  [警告] LV Ref {lower_ref_name} 找不到子结构引用。")
-                    continue
+                # 判定: 这里的参考对象是 Lower Ref 还是 Upper Ref?
+                # _is_copy_tube 的逻辑主要是判断拓扑位置，用 Lower Ref 代表整个结构即可
+                if self._is_copy_tube(t_dev, l_ref_dev):
+                    t_wl = self._get_w_over_l(t_name, params_dict)
+                    if t_wl is None: continue
+                    
+                    # 确定具体的 Reference W/L
+                    target_ref_wl = None
+                    target_ref_name = None
+                    
+                    if AC.TAG_LV_UPPER_MIRROR in t_dev.tags:
+                        target_ref_wl = u_ref_wl
+                        target_ref_name = u_ref_name
+                    elif AC.TAG_LV_LOWER_MIRROR in t_dev.tags:
+                        target_ref_wl = l_ref_wl
+                        target_ref_name = l_ref_name
+                    else:
+                        # Fallback (不应发生)
+                        target_ref_wl = l_ref_wl
+                        target_ref_name = l_ref_name
+                    
+                    if target_ref_wl == 0: continue
 
-                lv_sub = next((s for s in self.circuit.substructures if s.sub_id == lv_sub_ref.sub_id), None)
-                if not lv_sub:
-                    print(f"  [警告] LV Ref {lower_ref_name} 找不到子结构实例 {lv_sub_ref.sub_id}。")
-                    continue
-
-            except StopIteration:
-                print(f"  [警告] LV 组 {lower_ref_name} 发生未知错误，无法计算上层 r_raw。")
-                continue
-            except Exception as e:
-                print(f"  [警告] LV 组 {lower_ref_name} 发生未知错误: {e}")
-                continue
-
-            upper_ref_wl = self._get_w_over_l(upper_ref_name, params_dict)
-
-            if upper_ref_wl is None:
-                print(f"  [警告] LV Upper Ref {upper_ref_name} W/L 计算失败。")
-                continue
-            #筛出镜像管
-            if self._net_matches(value_list[0],{"MOS_BIAS"}):
-                member_lists = value_list[3:]
-            else:
-                member_lists = value_list[2:]
-
-            # 2c. 遍历所有可能的复制管，并应用修正后的 r_raw 逻辑
-            for copy_name in member_lists:
-                # 检查 copy_name 是否是复制管 (参考 lower_ref_name, 这仍然是分组的 KEY)
-                if not self._is_copy_tube(f"{copy_name}_l", f"{lower_ref_name}_l"):
-                    continue
-
-                copy_dev = self.circuit.devices_dict.get(copy_name)
-                if not copy_dev: continue
-
-                copy_wl = self._get_w_over_l(copy_name, params_dict)
-                if copy_wl is None:
-                    print(f"  [警告] LV Copy {copy_name} W/L 计算失败。")
-                    continue
-
-                # --- 根据标签选择正确的参考 ---
-                target_ref_wl = None
-                target_ref_name = None
-
-                # 规则 1: "如果“复制管”有上层镜像管的标签..."
-                if self.DeviceTags.LV_MIRROR_UPPER_MIRROR in copy_dev.tags:
-                    target_ref_wl = upper_ref_wl
-                    target_ref_name = upper_ref_name
-                # 规则 2: "如果“复制管”有下层镜像管的标签..."
-                elif self.DeviceTags.LV_MIRROR_LOWER_MIRROR in copy_dev.tags:
-                    target_ref_wl = lower_ref_wl
-                    target_ref_name = lower_ref_name
-                else:
-                    # 回退 (例如，如果标记不完整，虽然不应发生)
-                    print(
-                        f"  [信息] LV Copy {copy_name} (Tags: {copy_dev.tags}) 未匹配上/下层特定逻辑，回退到下层参考 {lower_ref_name}。")
-                    target_ref_wl = lower_ref_wl
-                    target_ref_name = lower_ref_name
-
-                if target_ref_wl is None or target_ref_wl == 0.0:
-                    print(f"  [警告] LV Copy {copy_name} 的目标参考 {target_ref_name} W/L 为 0 或 None。")
-                    continue
-
-                r_raw = copy_wl / target_ref_wl
-
-                # 存储：键仍然是 lower_ref_name (因为之后上层参考管的参数会被设置为与下层参考管完全一样)，值是 (lower_ref_name, r_raw)
-                self.copy_tube_r_raw_map[copy_name] = (lower_ref_name, r_raw)
-                # 打印时显示 *实际* 使用的参考
-                print(f"  [LV] 记录 {copy_name} (实际参考: {target_ref_name}), r_raw = {r_raw:.4f}")
+                    r_raw = t_wl / target_ref_wl
+                    # 注意：存储时 Ref Name 统一存 Lower Ref Name (作为 Group Key)
+                    # 这样在 Phase 2 时可以统一处理
+                    self.copy_tube_r_raw_map[t_name] = (l_ref_name, r_raw)
+                    print(f"  [LV]  CopyTube: {t_name} (Ref: {target_ref_name}), r_raw={r_raw:.4f}")
 
         print("=" * 30 + " r_raw 预计算完成 " + "=" * 30)
 
@@ -3694,14 +3530,16 @@ class CircuitAnalyzer:
         2. 阶段二：在最后，基于 r_raw 真值对复制管进行最终补偿。
         """
         # 0. 目标字典和约束组
+        AC = self.AC
+
         new_device_params = copy.deepcopy(self.device_params)
         groups_to_process = self.constraint_groups
 
         TAG_PRIORITY_ORDER = [
-            self.DeviceTags.ROOT_REF,
-            self.DeviceTags.CURRENT_MIRROR_REF,
-            self.DeviceTags.LV_MIRROR_LOWER_REF,
-            self.DeviceTags.CASCODE_MAIN
+            AC.TAG_ROOT_REF,
+            AC.TAG_STD_MIRROR_REF,
+            AC.TAG_LV_LOWER_REF,
+            AC.TAG_CASCODE_MAIN
         ]
 
         # =================================================================
@@ -3733,8 +3571,8 @@ class CircuitAnalyzer:
                 try:
                     dev_name, key = golden_ref_param.rsplit("_", 1)
                     dev_tags = self.circuit.devices_dict[dev_name].tags
-                    if (self.DeviceTags.CURRENT_MIRROR_REF in dev_tags or
-                            self.DeviceTags.LV_MIRROR_LOWER_REF in dev_tags):
+                    if (AC.TAG_STD_MIRROR_REF in dev_tags or
+                            AC.TAG_LV_LOWER_REF in dev_tags):
                         is_ref_mirror_ref = True
                 except (KeyError, ValueError):
                     pass  # dev_name 解析失败
@@ -3748,9 +3586,10 @@ class CircuitAnalyzer:
                 values_float = []
                 for param_name in group:
                     val_str = self._get_param_val(param_name, new_device_params)
-                    val_float = self._parse_value_to_float(val_str)
-                    if val_float is not None:
-                        values_float.append(val_float)
+                    if val_str:
+                        val_float = self._parse_value_to_float(val_str)
+                        if val_float is not None:
+                            values_float.append(val_float)
 
                 if not values_float:
                     print("    [警告]: 组内无可解析的值，跳过。")
@@ -3833,11 +3672,11 @@ class CircuitAnalyzer:
                     m_new_str = m_now
 
                     # 9. 检查是否需要补偿 (比较 W比值 和 目标W/L比值)
-                    # 数学上, 要让W_new/W_ref = r_raw_target (因为 L_new=L_ref)
+                    # 数学上, 要让W_target/W_ref = r_raw_target (因为 L_new=L_ref)
                     if abs(r_now_W_ratio - r_raw_target) > 1e-9:
                         print(f"    [补偿需求]: r_now_W ({r_now_W_ratio:.4f}) != r_raw_target ({r_raw_target:.4f})")
 
-                        # W_new = W_ref_now * r_raw_target
+                        # 简单计算可知：W_target = W_ref_now * r_raw_target
                         W_target = W_ref_now_float * r_raw_target
 
                         m_target = float(m_now)
@@ -3880,125 +3719,5 @@ class CircuitAnalyzer:
 # ------------------------------
 if __name__ == "__main__":
     # 定义电路和缓存文件
-
-    netlist_file = "example_circuit.sp"
-    analyzer = CircuitAnalyzer.from_spice_netlist(netlist_file)
-
-    # ---  测试代码 ---
-    print("\n" + "=" * 30 + " 测试输出 " + "=" * 30)
-
-    # 1. 检查器件数量
-    print(f"\n[电路基本信息]")
-    print(f"  识别到的器件总数: {len(analyzer.circuit.devices_dict)}")
-
-    # 2. 检查部分器件的标签和所属子结构
-    print(f"\n[部分器件详情]")
-    devices_to_check = ["NM0", "PM0", "R0", "C0"]  # 示例器件
-    for name in devices_to_check:
-        dev = analyzer.circuit.devices_dict.get(name)
-        if dev:
-            print(f"  器件 {name}:")
-            print(f"    类型: {dev.type}")
-            print(f"    标签: {dev.tags}")
-            print(f"    所属子结构: {[f'{s.sub_type}({s.sub_id})' for s in dev.substructures]}")
-        else:
-            print(f"  器件 {name}: 未找到")
-
-    # 3. 检查缓存内容
-    print(f"\n[缓存内容]")
-    print(f"  差分正输入管 (diff_pair_positive): {analyzer.diff_pair_positive}")
-    print(f"  差分负输入管 (diff_pair_negative): {analyzer.diff_pair_negative}")
-    print(f"  差分输入对 (diff_pair): {analyzer.diff_pair}\n")
-
-    print(f"  正端输出管 (OUTPORT_POSITIVE): {analyzer.positive_outport}")
-    print(f"  负端输出管 (OUTPORT_NEGATIVE): {analyzer.negative_outport}")
-    print(f"  输出端对 (outport_pair): {analyzer.outport_pair}")
-    print(f"    输出对(output_pair): {analyzer.output_pair}\n")
-
-    print(f"  级联缓存 (cascode_cache): {analyzer.cascode_cache}")
-    print(f"  普通电流镜缓存 (current_cache): {analyzer.current_cache}")
-    print(f"  根参考管镜像管缓存 (root_bias_mirror): {analyzer.root_bias_mirror}")
-    print(f"  低压电流镜缓存 (lv_current): {analyzer.lv_current}\n")
-
-    print(f"  频率补偿缓存 (compensate): {analyzer.compensate}")
-    print(f"  RC共模检测缓存 (rc_common_detect): {analyzer.rc_common_detect}")
-    print(f"  对称电容对 (capacitor_pair): {analyzer.capacitor_pair}\n")
-
-    print(f"  4管共模检测缓存 (common_detect4): {analyzer.common_detect4}")
-    print(f"  2管共模检测缓存 (common_detect2): {analyzer.common_detect2}\n")
-
-    print(f"  A型负载 (A_load): {analyzer.A_load}")
-    print(f"  B型负载 (B_load): {analyzer.B_load}")
-    print(f"  典型负载 (typ_load): {analyzer.typ_load}")
-    print(f"  C型负载 (C_load): {analyzer.C_load}\n")
-
-    print(f"    输入尾电流源(input_tail): {analyzer.input_tail}")
-    print(f"    输出电流源(output_tail): {analyzer.output_tail}")
-    print(f"    公共尾电流源(common_tail): {analyzer.common_tail}\n")
-
-    # 4. 检查电流路径
-    print("\n[电流路径]")
-    if analyzer.circuit.current_paths:
-        for i, path in enumerate(analyzer.circuit.current_paths, 1):
-            print(f"  路径{i}: {' -> '.join(path)}")
-    else:
-        print("  未生成电流路径。")
-
-    # 5. 检查电流束
-    current_beams = analyzer.circuit.current_beams
-    print("\n[电流束分析结果]")
-    if current_beams:
-        for beam_id, paths in current_beams.items():
-            print(f"  电流束: {beam_id} (包含 {len(paths)} 条路径)")
-            # for i, path in enumerate(paths, 1):
-            #     print(f"    - 路径 {i}: {' -> '.join(path)}") # 详细路径可选
-    else:
-        print("  未分析出电流束。")
-
-    # 6. 检查电流束路径
-    print("\n[电流束路径 (Beam Paths)]")
-    if analyzer.circuit.current_beam_paths:
-        for beam_id, beam_path in analyzer.circuit.current_beam_paths.items():
-            print(f"  电流束: {beam_id}")
-            path_str = " -> ".join([
-                str(s) if len(s) > 1 else list(s)[0] if len(s) == 1 else "{}"
-                for s in beam_path
-            ])
-            print(f"    - 束路径: {path_str}")
-    else:
-        print("  未生成电流束路径。")
-
-    # 7.电流束内部网络
-    print(f"\n[电流束内部网络 (Beam Net Sets)]")
-    if analyzer.circuit.beam_net_sets:
-        for beam_id, net_set in analyzer.circuit.beam_net_sets.items():
-            print(f"  电流束: {beam_id} (包含 {len(net_set)} 个内部网络)")
-            print(f"    - 网络: {net_set}")  # 详细网络可选
-    else:
-        print("  未生成电流束内部网络。")
-
-    # 8. 检查登记的子结构实例
-    print("\n[登记的子结构实例]")
-    if analyzer.circuit.substructures:
-        for i, sub in enumerate(analyzer.circuit.substructures, 1):
-            print(f"  实例 {i}:")
-            print(f"    ID: {sub.sub_id}")
-            print(f"    类型: {sub.type}")
-            print(f"    成员: {sub.members}")
-            print(f"    约束: {sub.constraints}")  # 约束较长，可选打印
-    else:
-        print("  未登记任何子结构实例。")
-
-    # 9. 电路独立参数列表
-    print("\n[全局约束组 (Constraint Groups)]")
-    if analyzer.constraint_groups:
-        print(f"  共找到 {len(analyzer.constraint_groups)} 个等效参数组 (包含独立参数)：")
-        for i, group in enumerate(analyzer.constraint_groups, 1):
-            print(f"  组 {i}: {group}")
-    else:
-        print("  未生成任何全局约束组。")
-
-    # 10，电路修改后的初始解
-    print(analyzer.calibrate_params)
-
-    print("\n" + "=" * 28 + " 测试输出结束 " + "=" * 28)
+    print(f"测试开始")
+    
