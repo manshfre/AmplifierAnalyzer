@@ -297,7 +297,7 @@ class CircuitAnalyzer:
                 
             setattr(self, attr_name, value)
             if description:
-                self._chinese_map[value] = description
+                self._chinese_map[attr_name] = description
                 
             print(f"[AnalysisConfig] 已注册(实例级): {attr_name} = '{value}' ({description})")
 
@@ -313,12 +313,10 @@ class CircuitAnalyzer:
             if hasattr(self.__class__, attr_name):
                 print(f"[AnalysisConfig] 警告: 无法移除静态定义的常量 {attr_name}，操作被忽略。")
                 return
-
-            value = getattr(self, attr_name)
-
+            
             # 从描述映射中移除
-            if value in self._chinese_map:
-                del self._chinese_map[value]
+            if attr_name in self._chinese_map:
+                del self._chinese_map[attr_name]
                     
             # 从实例属性中移除
             if attr_name in self._dynamic_keys:
@@ -3684,7 +3682,7 @@ class CircuitAnalyzer:
 
         # 2. 遍历每个电流镜组
         for ref_dev_name, copy_dev_list in ref_to_copy_tubes_map.items():
-            # 3. A/B 类划分 (基于阶段一 "污染" 后的参数)
+            # 3. (基于阶段一 "污染" 后的参数)
             param_groups: DefaultDict[tuple, List[str]] = defaultdict(list)
             for dev_name in copy_dev_list:
                 try:
@@ -3692,17 +3690,16 @@ class CircuitAnalyzer:
                     fw = params['fw']
                     m = params['m']
                     l = params['l']
-                    param_groups[(fw, m, l)].append(dev_name)
+                    param_groups[(fw, m, l)].append(dev_name)   #有可能有多个复制管对应的三个参数相等，归为一组
                 except KeyError:
                     continue
 
-            # 4. 处理 A 类 (对称) 和 B 类 (独立)
+            # 4. 
             for (fw_now, m_now, l_now_unused), dev_group in param_groups.items():
-                group_type = "A类 (对称)" if len(dev_group) > 1 else "B类 (独立)"
 
                 try:
                     # 5. 计算 r_raw_target
-                    r_raw_list = [self.copy_tube_r_raw_map[dev_name][1] for dev_name in dev_group]
+                    r_raw_list = [self.copy_tube_r_raw_map[dev_name][1] for dev_name in dev_group]  #获取一组复制管的原始复制比
                     r_raw_target = sum(r_raw_list) / len(r_raw_list)
 
                     # 6. 获取参考管 *当前* (阶段一后) 的 W 和 L
@@ -3773,6 +3770,184 @@ class CircuitAnalyzer:
 # 使用示例
 # ------------------------------
 if __name__ == "__main__":
-    # 定义电路和缓存文件
-    print(f"测试开始")
+    import os
+    import sys
+
+    # ================= 配置区 =================
+    # [请修改] 这里填写您的 SPICE 网表文件路径
+    # 如果文件在同目录下，直接写文件名即可
+    netlist_path = "test_circuit.sp" 
+    # =========================================
+
+    print("\n" + "=" * 30 + " 测试初始化 " + "=" * 30)
+    
+    # 简单的文件存在检查
+    if not os.path.exists(netlist_path):
+        print(f"[错误] 网表文件不存在: {netlist_path}")
+        print("提示: 请在脚本底部的 'netlist_path' 变量中填入有效的 SPICE 网表路径。")
+        # 此时程序不会崩溃，但后续分析步骤会跳过
+    else:
+        try:
+            # 1. 初始化分析器 (面向 SPICE 网表)
+            # 内部会自动调用 from_parsed_data 并执行 _run_analysis_pipeline
+            analyzer = CircuitAnalyzer.from_spice_netlist(netlist_path)
+            AC = analyzer.ac  # 快捷引用配置对象
+
+            print("\n" + "=" * 30 + " 测试输出 " + "=" * 30)
+
+            # --- 1. 检查器件数量 ---
+            print(f"\n[电路基本信息]")
+            print(f"  识别到的器件总数: {len(analyzer.circuit.devices_dict)}")
+
+            # --- 2. 检查部分器件详情 ---
+            # 自动选取前5个器件进行展示，或使用默认列表
+            devices_to_check = list(analyzer.circuit.devices_dict.keys())[:5]
+            if not devices_to_check:
+                devices_to_check = ["M1", "M2"] # Fallback
+
+            print(f"\n[部分器件详情 (示例)]")
+            for name in devices_to_check:
+                dev = analyzer.circuit.devices_dict.get(name)
+                if dev:
+                    # 将 Tags 转换为中文描述以便阅读
+                    cn_tags = [AC.get_chinese_name(t) for t in dev.tags]
+                    # 获取子结构引用信息
+                    subs = [f"{AC.get_chinese_name(s.sub_type)}({s.sub_id})" for s in dev.substructures]
+                    
+                    print(f"  器件 {name}:")
+                    print(f"    类型: {dev.type}")
+                    print(f"    标签: {cn_tags}")
+                    print(f"    所属子结构: {subs}")
+                else:
+                    print(f"  器件 {name}: 未找到")
+
+            # --- 3. 检查拓扑识别结果 (映射新架构存储) ---
+            print(f"\n[关键拓扑结构识别 (Tags & Groups)]")
+            
+            # 辅助函数: 打印 Device Groups (对应原 diff_pair, output_pair 等列表)
+            def print_group(label, key):
+                groups = analyzer.device_groups.get(key, [])
+                if groups:
+                    print(f"  {label}: {groups}")
+                else:
+                    print(f"  {label}: (无)")
+
+            # 辅助函数: 打印 Tag Index (对应原 diff_pair_positive 等集合)
+            def print_tag(label, key):
+                names = analyzer.get_names_by_tag(key)
+                if names:
+                    print(f"  {label}: {list(names)}")
+
+            # 辅助函数: 打印 Relation (对应原 cascode_cache 等字典)
+            def print_relation(label, rel_key):
+                res = []
+                for src, rels in analyzer.relation_graph.items():
+                    if rel_key in rels:
+                        targets = rels[rel_key]
+                        res.append(f"{src}->{targets}")
+                if res:
+                    print(f"  {label}: {res}")
+                else:
+                    print(f"  {label}: (无)")
+
+            # > 输入级
+            print_tag("差分正输入管", AC.TAG_DIFF_POS)
+            print_tag("差分负输入管", AC.TAG_DIFF_NEG)
+            print_group("差分输入对", AC.STR_DIFF_PAIR)
+            print("")
+            
+            # > 输出级
+            print_tag("正端输出管", AC.TAG_OUTPORT_POS)
+            print_tag("负端输出管", AC.TAG_OUTPORT_NEG)
+            print_group("输出端对", AC.STR_OUTPORT_PAIR)
+            print_group("逻辑输出对", AC.STR_OUTPUT_PAIR)
+            print("")
+            
+            # > 级联与电流镜 (核心关系)
+            print_relation("级联关系 (Main->Slave)", AC.REL_CASCODE_M2S)
+            print_relation("普通电流镜 (Ref->Mirror)", AC.REL_STD_REF2MIRROR)
+            print_relation("根偏置锁定 (Root->Bias)", AC.REL_STD_ROOT2BIAS)
+            print_relation("低压电流镜 (LRef->Token)", AC.REL_LV_LREF2TOKEN)
+            print("")
+            
+            # > 无源与共模
+            print_group("频率补偿", AC.STR_FREQ_COMPENSATE)
+            print_group("共模检测(2管)", AC.STR_CM_DETECT_A)
+            print_group("共模检测(4管)", AC.STR_CM_DETECT_B)
+            print_group("对称电容", AC.STR_SYM_CAPACITOR)
+            print("")
+            
+            # > 负载结构
+            print_group("A型负载", AC.STR_LOAD_A)
+            print_group("B型负载", AC.STR_LOAD_B)
+            print_group("典型负载", AC.STR_LOAD_TYPICAL)
+            print_group("低压镜像对", AC.STR_LV_MIRROR_PAIR)
+
+            # --- 4. 检查电流束内部网络 ---
+            print(f"\n[电流束内部网络 (Beam Net Sets)]")
+            if analyzer.circuit.beam_net_sets:
+                for beam_id, net_set in analyzer.circuit.beam_net_sets.items():
+                    print(f"  {beam_id}: {list(net_set)}")
+            else:
+                print("  (未生成)")
+
+            # --- 5. 检查电流路径 ---
+            print("\n[电流路径 (前10条)]")
+            if analyzer.circuit.current_paths:
+                for i, path in enumerate(analyzer.circuit.current_paths[:10], 1):
+                    print(f"  路径{i}: {' -> '.join(path)}")
+                if len(analyzer.circuit.current_paths) > 10:
+                    print(f"  ... (共 {len(analyzer.circuit.current_paths)} 条)")
+            else:
+                print("  (未生成)")
+
+            # --- 6. 检查电流束概况 ---
+            print("\n[电流束 (Current Beams)]")
+            if analyzer.circuit.current_beams:
+                for beam_id, paths in analyzer.circuit.current_beams.items():
+                    print(f"  {beam_id}: 聚合了 {len(paths)} 条路径")
+            else:
+                print("  (未分析出电流束)")
+
+            # --- 7. 检查电流束具体路径 (抽象化) ---
+            print("\n[电流束路径 (Beam Paths - Abstract)]")
+            if analyzer.circuit.current_beam_paths:
+                for beam_id, beam_path in analyzer.circuit.current_beam_paths.items():
+                    # beam_path 是 List[Set[str]]，将其格式化为 {M1,M2}->{M3,M4} 形式
+                    path_str = " -> ".join([
+                        f"{{{','.join(s)}}}" if len(s) > 1 else list(s)[0] if len(s) == 1 else "{}"
+                        for s in beam_path
+                    ])
+                    print(f"  {beam_id}:\n    {path_str}")
+            else:
+                print("  (未生成)")
+
+            # --- 8. 检查登记的子结构实例 ---
+            print("\n[登记的子结构实例 (Substructures)]")
+            if analyzer.circuit.substructures:
+                for i, sub in enumerate(analyzer.circuit.substructures, 1):
+                    cn_type = AC.get_chinese_name(sub.type)
+                    print(f"  实例 {i}: [{cn_type}] ID={sub.sub_id}")
+                    print(f"    成员: {sub.members}")
+                    # print(f"    约束: {sub.constraints}") # 调试时可开启
+            else:
+                print("  (未登记任何子结构)")
+
+            # --- 9. 检查参数约束组 ---
+            print("\n[全局约束组 (Constraint Groups)]")
+            if analyzer.constraint_groups:
+                print(f"  共生成 {len(analyzer.constraint_groups)} 个参数关联组：")
+                # 仅打印前 5 组作为示例，防止刷屏
+                for i, group in enumerate(analyzer.constraint_groups[:5], 1):
+                    print(f"  组 {i}: {group}")
+                if len(analyzer.constraint_groups) > 5:
+                    print(f"  ... (剩余 {len(analyzer.constraint_groups)-5} 组未显示)")
+            else:
+                print("  (未生成)")
+
+            print("\n" + "=" * 28 + " 测试输出结束 " + "=" * 28)
+
+        except Exception as e:
+            traceback.print_exc()
+            print(f"\n[严重错误] 分析器运行失败: {e}")
     
